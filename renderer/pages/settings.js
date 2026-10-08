@@ -3,12 +3,13 @@
 window.Pages.settings = {
   async render(container) {
     const settings = await window.api.getSettings();
+    const gf = await window.api.getGfSettings();
     const dataDir = await window.api.getDataDir();
     const version = await window.api.getVersion();
 
     container.innerHTML = `
       <h1>Settings</h1>
-      <p class="subtitle">Emails are sent through your own email account via SMTP.</p>
+      <p class="subtitle">Emails are sent through your own email account via SMTP. Signups come from a Gravity Forms form on the website.</p>
 
       <div class="panel">
         <h2 style="margin-top:0">SMTP</h2>
@@ -64,8 +65,42 @@ window.Pages.settings = {
       </div>
 
       <div class="panel">
+        <h2 style="margin-top:0">Signup form (Gravity Forms)</h2>
+        <p class="hint" style="margin-top:0">Lets the Import page bring in new signups. In WordPress, under Forms → Settings → REST API, turn the API on and
+          add a key with read access; the site has to use https.</p>
+        <div class="row">
+          <div class="field" style="flex:1">
+            <label for="gf-site">Website address</label>
+            <input type="url" id="gf-site" value="${escapeHtml(gf.siteUrl)}" placeholder="https://www.example.org" />
+          </div>
+        </div>
+        <div class="row">
+          <div class="field" style="flex:1">
+            <label for="gf-key">Consumer key</label>
+            <input type="text" id="gf-key" value="${escapeHtml(gf.consumerKey)}" />
+          </div>
+          <div class="field" style="flex:1">
+            <label for="gf-secret">Consumer secret ${gf.hasSecret ? "(saved — leave blank to keep)" : ""}</label>
+            <input type="password" id="gf-secret" placeholder="${gf.hasSecret ? "••••••••" : ""}" />
+          </div>
+        </div>
+        <div class="row">
+          <div class="field" style="flex:1">
+            <label for="gf-form">Signup form</label>
+            <select id="gf-form">${
+              gf.formId ? `<option value="${escapeHtml(gf.formId)}">${escapeHtml(gf.formTitle || `Form ${gf.formId}`)}</option>` : '<option value="">Connect to see the forms</option>'
+            }</select>
+          </div>
+          <button class="btn secondary" id="gf-connect-btn" type="button" style="align-self:flex-end;margin-bottom:12px">Connect and list forms</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button class="btn" id="gf-save-btn" type="button">Save</button>
+        </div>
+      </div>
+
+      <div class="panel">
         <h2 style="margin-top:0">Data location</h2>
-        <p class="hint">Imported contacts, templates, generated PDFs, and tracking data are stored here:</p>
+        <p class="hint">The mailing list, templates and their PDFs, and the record of every mailing are stored here:</p>
         <div class="row">
           <code>${escapeHtml(dataDir)}</code>
           <button class="btn secondary" id="open-data-dir-btn" type="button">Open folder</button>
@@ -118,6 +153,44 @@ window.Pages.settings = {
       }
       btn.disabled = false;
       btn.textContent = "Test connection";
+    });
+
+    function gfFields() {
+      return {
+        siteUrl: qs("#gf-site", container).value.trim(),
+        consumerKey: qs("#gf-key", container).value.trim(),
+        consumerSecret: qs("#gf-secret", container).value,
+      };
+    }
+    qs("#gf-connect-btn", container).addEventListener("click", async () => {
+      const btn = qs("#gf-connect-btn", container);
+      btn.disabled = true;
+      btn.textContent = "Connecting…";
+      try {
+        const forms = await window.api.listGfForms(gfFields());
+        const select = qs("#gf-form", container);
+        const current = select.value;
+        select.innerHTML = forms.map((f) => `<option value="${escapeHtml(f.id)}">${escapeHtml(f.title)}</option>`).join("") || '<option value="">No forms on this site</option>';
+        if (forms.some((f) => f.id === current)) select.value = current;
+        else {
+          const signup = forms.find((f) => /sign\s*up|subscribe|newsletter/i.test(f.title));
+          if (signup) select.value = signup.id;
+        }
+        toast(`Connected — ${plural(forms.length, "form")} found. Pick the signup form and save.`);
+      } catch (err) {
+        toast(`Couldn't connect: ${err.message}`, true);
+      }
+      btn.disabled = false;
+      btn.textContent = "Connect and list forms";
+    });
+    qs("#gf-save-btn", container).addEventListener("click", async () => {
+      const select = qs("#gf-form", container);
+      try {
+        await window.api.saveGfSettings({ ...gfFields(), formId: select.value, formTitle: select.selectedOptions[0]?.textContent || "" });
+        toast("Signup form settings saved.");
+      } catch (err) {
+        toast(`Couldn't save: ${err.message}`, true);
+      }
     });
 
     qs("#open-data-dir-btn", container).addEventListener("click", () => window.api.openPath(dataDir));

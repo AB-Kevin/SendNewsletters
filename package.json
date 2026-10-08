@@ -1,7 +1,7 @@
 {
   "name": "sendnewsletters",
   "version": "0.1.0",
-  "description": "SendNewsletters - import a mailing list, send email/paper form requests, and track who has responded",
+  "description": "SendNewsletters - keep the newsletter mailing list, email the newsletter as a PDF, and get the addresses and counts for mailed copies",
   "main": "main.js",
   "author": "",
   "license": "MIT",
@@ -45,8 +45,6 @@
     "electron-updater": "^6.8.9",
     "nodemailer": "^6.9.16",
     "papaparse": "^5.4.1",
-    "pdf-lib": "^1.17.1",
-    "uuid": "^9.0.1",
     "xlsx": "^0.18.5"
   }
 }

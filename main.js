@@ -1,23 +1,21 @@
 "use strict";
 
-const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, clipboard, nativeTheme } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, nativeTheme } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const path = require("path");
 const fs = require("fs");
 const { randomUUID } = require("crypto");
 
 const store = require("./db/store");
-const csvImport = require("./lib/csvImport");
-const { filterContacts, listFilterableFields } = require("./lib/filter");
-const { renderTemplate, buildResponseLink, htmlToPlainText } = require("./lib/merge");
-const { stampToken } = require("./lib/pdfStamp");
-const { generatePaperLetter } = require("./lib/paperMerge");
+const listImport = require("./lib/listImport");
+const rules = require("./lib/contactRules");
+const matching = require("./lib/matching");
+const { filterContacts } = require("./lib/filter");
+const { renderTemplate, htmlToPlainText } = require("./lib/merge");
 const mailer = require("./lib/mailer");
+const duplicates = require("./lib/duplicates");
 const gravityForms = require("./lib/gravityForms");
-const entryView = require("./lib/entryView");
-const { generateToken } = require("./lib/tokens");
 
-const SYNC_INTERVAL_MS = 5 * 60 * 1000;
 let mainWindow = null;
 
 // ---- secret encryption (SMTP password, Gravity Forms consumer secret) ----
@@ -92,13 +90,9 @@ if (process.env.SENDNEWSLETTERS_DATA_DIR) {
 
 app.whenReady().then(() => {
   store.init(app.getPath("userData"));
+  seedPublications();
   nativeTheme.themeSource = savedTheme();
   createWindow();
-  setInterval(() => {
-    runSync()
-      .then((summary) => mainWindow?.webContents.send("sync:completed", summary))
-      .catch((err) => console.error("Background sync failed:", err));
-  }, SYNC_INTERVAL_MS);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -107,6 +101,301 @@ app.whenReady().then(() => {
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
+});
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+// People, households (addresses) and organizations, and the newsletters each
+// gets -- see lib/contactRules.js.
+const BLANK_ADDRESS = { addressLine1: "", addressLine2: "", city: "", state: "", zip: "" };
+const BLANK_CONTACT = { name: "", email: "", orgId: null, householdId: null, subs: {}, sourceBatch: "" };
+const BLANK_HOUSEHOLD = { ...BLANK_ADDRESS, subs: {} };
+const BLANK_ORG = { name: "", attn: "", email: "", ...BLANK_ADDRESS, subs: {}, sourceBatch: "" };
+
+const cleanText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+
+// Keeps only what each kind of record actually has, in the types it's stored
+// as, whatever the renderer sent. `subs` patches are { [publicationId]:
+// { email, mail, copies } } for the fields that kind uses; a copy count
+// that isn't a number is dropped rather than saved as 0.
+const RECORD_FIELDS = {
+  contact: { text: rules.PERSON_TEXT_FIELDS, subs: ["email"] },
+  household: { text: rules.ADDRESS_FIELDS, subs: ["mail", "copies"] },
+  org: { text: [...rules.ORG_TEXT_FIELDS, ...rules.ADDRESS_FIELDS], subs: ["email", "mail", "copies"] },
+};
+
+function sanitizePatch(kind, patch, publicationIds) {
+  const { text, subs } = RECORD_FIELDS[kind];
+  const clean = {};
+  for (const [key, value] of Object.entries(patch || {})) {
+    if (text.includes(key)) clean[key] = cleanText(value);
+    else if (key === "orgName" && kind === "contact") clean.orgName = cleanText(value);
+    else if (key === "subs") {
+      clean.subs = {};
+      for (const [pubId, fields] of Object.entries(value || {})) {
+        if (!publicationIds.has(pubId)) continue;
+        const entry = {};
+        for (const [field, fieldValue] of Object.entries(fields || {})) {
+          if (!subs.includes(field)) continue;
+          if (field === "copies") {
+            const copies = rules.parseCopies(fieldValue);
+            if (copies !== null) entry.copies = copies;
+          } else entry[field] = !!fieldValue;
+        }
+        clean.subs[pubId] = entry;
+      }
+    }
+  }
+  return clean;
+}
+
+function mergeSubs(current, patch) {
+  const next = { ...(current || {}) };
+  for (const [pubId, fields] of Object.entries(patch || {})) next[pubId] = { ...(next[pubId] || {}), ...fields };
+  return next;
+}
+
+function contactLabel(contact) {
+  return contact?.name || "(no name)";
+}
+
+// Everything on the mailing list, with lookups both ways.
+function loadList() {
+  const contacts = store.list("contacts");
+  const households = store.list("households");
+  const orgs = store.list("orgs");
+  const publications = store.list("publications");
+  const groupBy = (key) => {
+    const map = new Map();
+    for (const c of contacts) {
+      if (!c[key]) continue;
+      if (!map.has(c[key])) map.set(c[key], []);
+      map.get(c[key]).push(c);
+    }
+    return map;
+  };
+  return {
+    contacts,
+    households,
+    orgs,
+    publications,
+    contactById: new Map(contacts.map((c) => [c.id, c])),
+    householdById: new Map(households.map((h) => [h.id, h])),
+    orgById: new Map(orgs.map((o) => [o.id, o])),
+    membersOf: groupBy("householdId"),
+    orgMembers: groupBy("orgId"),
+  };
+}
+
+function formatAddress(place) {
+  return [place?.addressLine1, place?.addressLine2, place?.city, [place?.state, place?.zip].filter(Boolean).join(" ")].filter(Boolean).join(", ");
+}
+
+// A household with who lives there and who the label goes to.
+function describeHousehold(household, members, list) {
+  return {
+    ...household,
+    members: members.map((m) => ({ id: m.id, name: m.name, orgName: list.orgById.get(m.orgId)?.name || "" })),
+    addressee: rules.addresseeOf(members.map((m) => ({ name: m.name, orgName: list.orgById.get(m.orgId)?.name || "" }))),
+  };
+}
+
+function describeOrg(org, list) {
+  return { ...org, memberCount: (list.orgMembers.get(org.id) || []).length };
+}
+
+// The organization with this name ("The Maple Grove Mennonite Church" is
+// "Maple Grove Mennonite"), if there is one.
+function findOrgByName(orgs, name) {
+  const key = matching.orgKey(name);
+  return orgs.find((o) => matching.orgKey(o.name) === key) || null;
+}
+
+// A recipient's person, household or organization -- or, once it's been
+// deleted from the list, the copy saved on the recipient at the time, so a
+// mailing's history still says who it went to.
+function recipientContact(recipient, list) {
+  return list.contactById.get(recipient.contactId) || recipient.contactSnapshot || null;
+}
+
+function recipientHousehold(recipient, list) {
+  const household = list.householdById.get(recipient.householdId);
+  if (household) return describeHousehold(household, list.membersOf.get(household.id) || [], list);
+  return recipient.householdSnapshot || null;
+}
+
+function recipientOrg(recipient, list) {
+  const org = list.orgById.get(recipient.orgId);
+  return org ? describeOrg(org, list) : recipient.orgSnapshot || null;
+}
+
+// Where a mail recipient's bundle goes: their household, or their
+// organization's address for a batch.
+function recipientPlace(recipient, list) {
+  return recipient.orgId ? recipientOrg(recipient, list) : recipientHousehold(recipient, list);
+}
+
+// How many copies a mail recipient gets: what was recorded when it was
+// marked as mailed, or until then, the current number -- so fixing a count
+// on the Mailing List still changes a mailing that hasn't gone out.
+function recipientCopies(recipient, place, publicationId) {
+  if (recipient.channel !== "mail") return null;
+  if (recipient.status === "sent" && Number.isFinite(recipient.copies)) return recipient.copies;
+  return rules.copiesFor(place, publicationId);
+}
+
+function sum(values) {
+  return values.reduce((total, n) => total + (Number(n) || 0), 0);
+}
+
+// Takes households or organizations off mailings once they're removed from
+// the list, or folds them into `replacementId` when combined. A mailing that
+// hasn't reached one yet moves to the replacement, or drops it; one that has
+// keeps a copy of who and where it was -- naming the people in `before`, the
+// list as it was before they moved out, when that has already happened.
+function retirePlaces(kind, ids, replacementId = null, before = loadList()) {
+  if (!ids.size) return;
+  const idField = kind === "org" ? "orgId" : "householdId";
+  const snapshotField = kind === "org" ? "orgSnapshot" : "householdSnapshot";
+  const snapshots = new Map();
+  for (const id of ids) {
+    if (kind === "org" && before.orgById.has(id)) snapshots.set(id, describeOrg(before.orgById.get(id), before));
+    if (kind === "household" && before.householdById.has(id)) {
+      snapshots.set(id, describeHousehold(before.householdById.get(id), before.membersOf.get(id) || [], before));
+    }
+  }
+  store.mutate("mailingRecipients", (recipients) => {
+    const replacementIn = new Set(recipients.filter((r) => replacementId && r[idField] === replacementId).map((r) => `${r.mailingId}|${r.channel}`));
+    const next = [];
+    for (const r of recipients) {
+      if (!ids.has(r[idField])) next.push(r);
+      else if (r.status !== "pending") next.push(r[snapshotField] ? r : { ...r, [snapshotField]: snapshots.get(r[idField]) });
+      else if (replacementId && !replacementIn.has(`${r.mailingId}|${r.channel}`)) {
+        replacementIn.add(`${r.mailingId}|${r.channel}`);
+        next.push({ ...r, [idField]: replacementId });
+      }
+    }
+    return next;
+  });
+  store.removeWhere(kind === "org" ? "orgs" : "households", (row) => ids.has(row.id));
+}
+
+// Households among `ids` that nobody lives in any more.
+function emptyHouseholds(ids) {
+  const occupied = new Set(store.list("contacts").map((c) => c.householdId));
+  return new Set([...ids].filter((id) => id && !occupied.has(id)));
+}
+
+// One save dialog for every export: the file type picked in the dialog
+// decides between Excel and CSV.
+async function saveTable(columns, rows, { title, defaultName, sheetName }) {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title,
+    defaultPath: `${defaultName}.xlsx`,
+    filters: [
+      { name: "Excel workbook", extensions: ["xlsx"] },
+      { name: "CSV", extensions: ["csv"] },
+    ],
+  });
+  if (result.canceled || !result.filePath) return null;
+
+  if (path.extname(result.filePath).toLowerCase() === ".csv") {
+    const Papa = require("papaparse");
+    // The byte-order mark makes Excel read accented names as UTF-8;
+    // escapeFormulae keeps a name like "=Smith" from running as a formula.
+    const csv = Papa.unparse({ fields: columns, data: rows.map((row) => columns.map((c) => row[c])) }, { escapeFormulae: true });
+    fs.writeFileSync(result.filePath, "﻿" + csv, "utf8");
+  } else {
+    const XLSX = require("xlsx");
+    const worksheet = XLSX.utils.json_to_sheet(rows, { header: columns });
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+    XLSX.writeFile(workbook, result.filePath);
+  }
+  return result.filePath;
+}
+
+const yesNo = (value) => (value ? "Yes" : "No");
+
+// ---------------------------------------------------------------------------
+// Newsletters and magazines
+// ---------------------------------------------------------------------------
+
+// The two the office sends today, added the first time the app runs; after
+// that the list is whatever's been added, renamed or removed.
+function seedPublications() {
+  if (store.getSettings().publicationsSeeded) return;
+  if (!store.list("publications").length) store.insertMany("publications", [{ name: "MAAP Newsletter" }, { name: "Our Health" }]);
+  store.updateSettings({ publicationsSeeded: true });
+}
+
+ipcMain.handle("publications:list", async () => store.list("publications"));
+
+function checkPublicationName(name, exceptId) {
+  const clean = cleanText(name);
+  if (!clean) throw new Error("Give it a name.");
+  if (store.list("publications").some((p) => p.id !== exceptId && p.name.toLowerCase() === clean.toLowerCase())) {
+    throw new Error(`There's already one called "${clean}".`);
+  }
+  return clean;
+}
+
+ipcMain.handle("publications:add", async (event, name) => store.insert("publications", { name: checkPublicationName(name) }));
+
+ipcMain.handle("publications:rename", async (event, id, name) => store.update("publications", id, { name: checkPublicationName(name, id) }));
+
+// Takes it off everyone; past mailings of it keep its name.
+ipcMain.handle("publications:remove", async (event, id) => {
+  const strip = (row) => (row.subs && id in row.subs ? { subs: Object.fromEntries(Object.entries(row.subs).filter(([key]) => key !== id)) } : null);
+  for (const collection of ["contacts", "households", "orgs"]) store.updateWhere(collection, strip);
+  store.remove("publications", id);
+  return true;
+});
+
+// ---------------------------------------------------------------------------
+// Gravity Forms signup form
+// ---------------------------------------------------------------------------
+
+function gfConnection(overrides = {}) {
+  const s = store.getSettings();
+  const connection = {
+    siteUrl: s.gfSiteUrl || "",
+    consumerKey: s.gfConsumerKey || "",
+    consumerSecret: decryptSecret(s.gfConsumerSecret),
+    formId: s.gfFormId || "",
+  };
+  for (const [key, value] of Object.entries(overrides)) if (value) connection[key] = value;
+  return connection;
+}
+
+ipcMain.handle("gf:get-settings", async () => {
+  const s = store.getSettings();
+  return {
+    siteUrl: s.gfSiteUrl || "",
+    consumerKey: s.gfConsumerKey || "",
+    hasSecret: !!s.gfConsumerSecret,
+    formId: s.gfFormId || "",
+    formTitle: s.gfFormTitle || "",
+    lastImportedEntryId: s.gfLastImportedEntryId || 0,
+  };
+});
+
+// A blank secret means "the one already saved", so testing a change to the
+// site URL doesn't need the secret typed in again.
+ipcMain.handle("gf:list-forms", async (event, { siteUrl, consumerKey, consumerSecret }) =>
+  gravityForms.listForms(gfConnection({ siteUrl: cleanText(siteUrl), consumerKey: cleanText(consumerKey), consumerSecret }))
+);
+
+ipcMain.handle("gf:save-settings", async (event, { siteUrl, consumerKey, consumerSecret, formId, formTitle }) => {
+  const current = store.getSettings();
+  const patch = { gfSiteUrl: cleanText(siteUrl), gfConsumerKey: cleanText(consumerKey), gfFormId: String(formId || ""), gfFormTitle: formTitle || "" };
+  if (consumerSecret) patch.gfConsumerSecret = encryptSecret(consumerSecret);
+  // A different form numbers its entries separately.
+  if (patch.gfFormId !== (current.gfFormId || "")) patch.gfLastImportedEntryId = 0;
+  store.updateSettings(patch);
+  return true;
 });
 
 // ---------------------------------------------------------------------------
@@ -123,35 +412,451 @@ ipcMain.handle("dialog:pick-import-file", async () => {
   return result.filePaths[0];
 });
 
-ipcMain.handle("import:preview", async (event, filePath) => {
-  const { headers, rows } = csvImport.parseFile(filePath);
-  return { headers, sampleRows: rows.slice(0, 20), totalRows: rows.length };
-});
+// An import reads from a file ({ kind: "file", filePath }) or the signup
+// form ({ kind: "signup", includeImported }). Either way it comes out as
+// { headers, rows }, and everything after that is the same.
+//
+// The import page re-plans on every mapping change, so the last file read
+// is kept until it changes on disk, and signups are fetched once, when the
+// source is chosen, and kept for that import.
+let parsedFileCache = null;
+let signupCache = null;
 
-ipcMain.handle("import:commit", async (event, filePath, mapping, batchName) => {
-  const { rows } = csvImport.parseFile(filePath);
-  const contacts = csvImport.buildContacts(rows, mapping, batchName || path.basename(filePath));
-  const { inserted, updated } = store.upsertMany("contacts", "externalId", contacts);
-  return { count: contacts.length, inserted, updated };
-});
+function readImportSource(source) {
+  if (source.kind === "signup") {
+    if (!signupCache) throw new Error("Get the signups again -- the ones fetched earlier are no longer loaded.");
+    return signupCache;
+  }
+  const { mtimeMs } = fs.statSync(source.filePath);
+  if (parsedFileCache?.filePath !== source.filePath || parsedFileCache.mtimeMs !== mtimeMs) {
+    parsedFileCache = { filePath: source.filePath, mtimeMs, parsed: listImport.parseFile(source.filePath) };
+  }
+  return parsedFileCache.parsed;
+}
 
-// ---------------------------------------------------------------------------
-// Contacts
-// ---------------------------------------------------------------------------
-
-ipcMain.handle("contacts:list", async () => store.list("contacts"));
-
-ipcMain.handle("contacts:filterable-fields", async () => listFilterableFields(store.list("contacts")));
-
-ipcMain.handle("contacts:preview-filter", async (event, rules) => {
-  const contacts = store.list("contacts");
-  const matched = filterContacts(contacts, rules);
+ipcMain.handle("import:preview", async (event, source) => {
+  let label;
+  if (source.kind === "signup") {
+    const connection = gfConnection();
+    if (!connection.siteUrl || !connection.formId) throw new Error("Set up the signup form in Settings first.");
+    const afterId = source.includeImported ? 0 : store.getSettings().gfLastImportedEntryId || 0;
+    const [form, entries] = await Promise.all([gravityForms.fetchForm(connection), gravityForms.fetchEntries(connection, afterId)]);
+    signupCache = { ...gravityForms.entriesToTable(form, entries), maxEntryId: Math.max(0, ...entries.map((e) => Number(e.id) || 0)) };
+    label = `Signup form ${new Date().toLocaleDateString()}`;
+  } else {
+    label = path.basename(source.filePath);
+  }
+  const { headers, rows } = readImportSource(source);
+  const publications = store.list("publications");
   return {
-    total: matched.length,
-    withEmail: matched.filter((c) => c.email).length,
-    withoutEmail: matched.filter((c) => !c.email).length,
-    sample: matched.slice(0, 25),
+    headers,
+    totalRows: rows.length,
+    samples: Object.fromEntries(headers.map((h) => [h, listImport.sampleValues(rows, h, 3)])),
+    mapping: listImport.guessMapping(headers, rows, publications),
+    targets: listImport.importTargets(publications),
+    deliveryDefaults: listImport.DELIVERY_DEFAULTS,
+    publications,
+    defaultBatchName: label,
   };
+});
+
+function planImport(source, mapping, options) {
+  const { rows } = readImportSource(source);
+  const list = loadList();
+  return listImport.planImport(rows, mapping, options, { contacts: list.contacts, households: list.households, orgs: list.orgs }, list.publications);
+}
+
+ipcMain.handle("import:plan", async (event, source, mapping, options) => {
+  const { stats, matches, ambiguousNames, contactInserts, after } = planImport(source, mapping, options);
+  // New contacts the duplicate checker would flag once they're in --
+  // usually the same person under a nickname or with a different email.
+  const newIds = new Set(contactInserts.map((c) => c.id));
+  const { duplicates: groups } = duplicates.findDuplicates(after.contacts, after.households, after.orgs, dismissedPairs());
+  const possibleDuplicates = groups.filter((g) => g.ids.some((id) => newIds.has(id))).length;
+  return { stats, ambiguousNames, possibleDuplicates, matches: matches.filter((m) => m.changedFields.length).slice(0, 200) };
+});
+
+ipcMain.handle("import:commit", async (event, source, mapping, options) => {
+  const plan = planImport(source, mapping, options);
+  const before = loadList();
+  const now = new Date().toISOString();
+  const stamp = (rows, blank) => rows.map((row) => ({ ...blank, ...row, createdAt: now, updatedAt: now }));
+  const patchAll = (collection, updates) => {
+    const patches = new Map(updates.map((u) => [u.id, u.patch]));
+    store.updateWhere(collection, (row) => (patches.has(row.id) ? { ...patches.get(row.id), updatedAt: now } : null));
+  };
+  store.insertMany("orgs", stamp(plan.orgInserts, BLANK_ORG));
+  patchAll("orgs", plan.orgUpdates);
+  store.insertMany("households", stamp(plan.householdInserts, BLANK_HOUSEHOLD));
+  patchAll("households", plan.householdUpdates);
+  patchAll("contacts", plan.contactUpdates);
+  store.insertMany("contacts", stamp(plan.contactInserts, BLANK_CONTACT));
+  retirePlaces("household", emptyHouseholds(plan.householdDeletes), null, before);
+  if (source.kind === "signup" && signupCache?.maxEntryId) {
+    store.updateSettings({ gfLastImportedEntryId: Math.max(store.getSettings().gfLastImportedEntryId || 0, signupCache.maxEntryId) });
+  }
+  return plan.stats;
+});
+
+// ---------------------------------------------------------------------------
+// The Mailing List (people, households and organizations)
+// ---------------------------------------------------------------------------
+
+ipcMain.handle("list:get", async () => {
+  const list = loadList();
+  return { contacts: list.contacts, households: list.households, orgs: list.orgs, publications: list.publications };
+});
+
+ipcMain.handle("contacts:create", async () =>
+  store.insert("contacts", { ...BLANK_CONTACT, sourceBatch: "Added by hand", updatedAt: new Date().toISOString() })
+);
+
+ipcMain.handle("orgs:create", async () => store.insert("orgs", { ...BLANK_ORG, sourceBatch: "Added by hand", updatedAt: new Date().toISOString() }));
+
+// Gives someone with no address a household of their own, so an address or
+// a mailed newsletter can be filled in for them.
+ipcMain.handle("households:create-for", async (event, contactId) => {
+  const contact = store.get("contacts", contactId);
+  if (!contact) throw new Error("Contact not found.");
+  if (contact.householdId && store.get("households", contact.householdId)) throw new Error("They already have an address.");
+  const now = new Date().toISOString();
+  const household = store.insert("households", { ...BLANK_HOUSEHOLD, updatedAt: now });
+  return { household, contact: store.update("contacts", contactId, { householdId: household.id, updatedAt: now }) };
+});
+
+// Takes [{ kind: "contact" | "household" | "org", id, patch }] -- one cell
+// edit, a paste across many cells, a bulk change, or an undo -- in one save
+// per collection. A person's Organization comes as a name (`orgName`): it
+// links them to the organization of that name, starting one if there isn't
+// one yet, or unlinks them when blank. Returns the saved rows, so the page
+// shows exactly what was stored.
+ipcMain.handle("list:update", async (event, changes) => {
+  const now = new Date().toISOString();
+  const publicationIds = new Set(store.list("publications").map((p) => p.id));
+  const byKind = { contact: new Map(), household: new Map(), org: new Map() };
+  for (const change of changes || []) {
+    const patches = byKind[change.kind];
+    if (!patches) continue;
+    const clean = sanitizePatch(change.kind, change.patch, publicationIds);
+    const prior = patches.get(change.id) || {};
+    patches.set(change.id, { ...prior, ...clean, ...(prior.subs || clean.subs ? { subs: mergeSubs(prior.subs, clean.subs) } : {}) });
+  }
+
+  const createdOrgs = [];
+  if ([...byKind.contact.values()].some((p) => "orgName" in p)) {
+    const orgs = store.list("orgs");
+    for (const patch of byKind.contact.values()) {
+      if (!("orgName" in patch)) continue;
+      const name = patch.orgName;
+      delete patch.orgName;
+      let org = name ? findOrgByName(orgs, name) : null;
+      if (name && !org) {
+        org = store.insert("orgs", { ...BLANK_ORG, name, sourceBatch: "Added by hand", updatedAt: now });
+        orgs.push(org);
+        createdOrgs.push(org);
+      }
+      patch.orgId = org ? org.id : null;
+    }
+  }
+  for (const [id, patch] of byKind.org) {
+    if ("name" in patch && !patch.name) throw new Error("An organization needs a name.");
+    const other = "name" in patch && findOrgByName(store.list("orgs").filter((o) => o.id !== id), patch.name);
+    if (other) throw new Error(`There's already an organization called "${other.name}". To fold one into the other, use Merge on the Duplicates page.`);
+  }
+
+  const collections = { contact: "contacts", household: "households", org: "orgs" };
+  const saved = {};
+  for (const [kind, patches] of Object.entries(byKind)) {
+    if (patches.size) {
+      store.updateWhere(collections[kind], (row) => {
+        const patch = patches.get(row.id);
+        if (!patch || !Object.keys(patch).length) return null;
+        return { ...patch, ...(patch.subs ? { subs: mergeSubs(row.subs, patch.subs) } : {}), updatedAt: now };
+      });
+    }
+    saved[collections[kind]] = store.list(collections[kind]).filter((row) => patches.has(row.id));
+  }
+  saved.orgs.push(...createdOrgs);
+  return saved;
+});
+
+// Anyone deleted drops out of emails that haven't gone to them yet; an
+// address nobody lives at any more is removed the same way. Where a mailing
+// already went, the recipient keeps a copy so its history still shows who.
+ipcMain.handle("contacts:delete-many", async (event, ids) => {
+  const idSet = new Set(ids || []);
+  const deleted = new Map(store.list("contacts").filter((c) => idSet.has(c.id)).map((c) => [c.id, c]));
+  store.removeWhere("mailingRecipients", (r) => deleted.has(r.contactId) && r.status === "pending");
+  store.updateWhere("mailingRecipients", (r) => (deleted.has(r.contactId) && !r.contactSnapshot ? { contactSnapshot: deleted.get(r.contactId) } : null));
+  const theirHouseholds = new Set([...deleted.values()].map((c) => c.householdId).filter(Boolean));
+  const left = (householdId) => store.list("contacts").some((c) => c.householdId === householdId && !deleted.has(c.id));
+  retirePlaces("household", new Set([...theirHouseholds].filter((h) => !left(h))));
+  const removed = store.removeWhere("contacts", (c) => deleted.has(c.id));
+  return { removed };
+});
+
+// Their members stay on the list, just no longer part of it.
+ipcMain.handle("orgs:delete-many", async (event, ids) => {
+  const idSet = new Set(ids || []);
+  retirePlaces("org", idSet);
+  store.updateWhere("contacts", (c) => (idSet.has(c.orgId) ? { orgId: null, updatedAt: new Date().toISOString() } : null));
+  return { removed: idSet.size };
+});
+
+// Per newsletter: on if any of them had it, and the most copies any had.
+function combineSubs(records) {
+  const combined = {};
+  for (const record of records) {
+    for (const [pubId, s] of Object.entries(record.subs || {})) {
+      const c = (combined[pubId] = combined[pubId] || {});
+      if (s.email) c.email = true;
+      if (s.mail) c.mail = true;
+      if (s.copies !== undefined) c.copies = Math.max(Number(c.copies) || 0, Number(s.copies) || 0);
+    }
+  }
+  return combined;
+}
+
+// Puts everyone in the given households (and any given people who have no
+// address yet) into one household, so the address gets one bundle. The one
+// kept is the one with the most people, then the most complete address; it
+// gets each newsletter by mail if any of them did, with the most copies.
+function combineHouseholds({ contactIds = [], householdIds = [] }) {
+  const list = loadList();
+  const people = contactIds.map((id) => list.contactById.get(id)).filter(Boolean);
+  const ids = new Set([...householdIds, ...people.map((c) => c.householdId)].filter((id) => list.householdById.has(id)));
+  if (!ids.size) throw new Error("None of them has an address to share.");
+  const candidates = [...ids].map((id) => list.householdById.get(id));
+  const completeness = (h) => rules.ADDRESS_FIELDS.filter((f) => h[f]).length;
+  const keep = [...candidates].sort(
+    (a, b) =>
+      (list.membersOf.get(b.id)?.length || 0) - (list.membersOf.get(a.id)?.length || 0) ||
+      completeness(b) - completeness(a) ||
+      new Date(a.createdAt) - new Date(b.createdAt)
+  )[0];
+  const others = new Set([...ids].filter((id) => id !== keep.id));
+  const now = new Date().toISOString();
+  store.update("households", keep.id, { subs: combineSubs(candidates), updatedAt: now });
+  retirePlaces("household", others, keep.id);
+  const moving = new Set(people.filter((c) => !list.householdById.has(c.householdId)).map((c) => c.id));
+  store.updateWhere("contacts", (c) => (others.has(c.householdId) || moving.has(c.id) ? { householdId: keep.id, updatedAt: now } : null));
+  return keep.id;
+}
+
+ipcMain.handle("households:combine", async (event, selection) => {
+  combineHouseholds(selection);
+  return true;
+});
+
+// Gives each of these people a household of their own at a copy of the same
+// address -- they were grouped by mistake, or one has a separate apartment
+// to fill in. It gets the same newsletters by mail, one copy each.
+// Remembered, so they aren't suggested as one household again.
+ipcMain.handle("households:separate", async (event, contactIds) => {
+  const list = loadList();
+  const now = new Date().toISOString();
+  let separated = 0;
+  for (const id of contactIds || []) {
+    const contact = list.contactById.get(id);
+    const household = contact && list.householdById.get(contact.householdId);
+    if (!household || (list.membersOf.get(household.id) || []).length < 2) continue;
+    const subs = Object.fromEntries(Object.entries(household.subs || {}).filter(([, s]) => s.mail).map(([pubId]) => [pubId, { mail: true, copies: 1 }]));
+    const own = store.insert("households", { ...BLANK_HOUSEHOLD, ...Object.fromEntries(rules.ADDRESS_FIELDS.map((f) => [f, household[f]])), subs, updatedAt: now });
+    store.update("contacts", id, { householdId: own.id, updatedAt: now });
+    list.membersOf.set(household.id, list.membersOf.get(household.id).filter((m) => m.id !== id));
+    dismissPairs("household", [household.id, own.id]);
+    separated++;
+  }
+  return { separated };
+});
+
+// Column headers the importer recognizes, so an exported list can be edited
+// in Excel and imported straight back. One row per person, with their
+// household's address and mailed newsletters on each.
+function publicationColumns(publications, { email = true, mail = true } = {}) {
+  return publications.flatMap((p) => [...(email ? [`${p.name}: Email`] : []), ...(mail ? [`${p.name}: Mail`, `${p.name}: Copies`] : [])]);
+}
+
+function publicationCells(publications, emailRecord, mailRecord) {
+  const cells = {};
+  for (const p of publications) {
+    if (emailRecord) cells[`${p.name}: Email`] = yesNo(rules.sub(emailRecord, p.id).email);
+    if (mailRecord !== undefined) {
+      const s = rules.sub(mailRecord, p.id);
+      cells[`${p.name}: Mail`] = yesNo(s.mail);
+      cells[`${p.name}: Copies`] = s.mail ? rules.copiesFor(mailRecord, p.id) : "";
+    }
+  }
+  return cells;
+}
+
+const ADDRESS_COLUMNS = { "Address 1": "addressLine1", "Address 2": "addressLine2", City: "city", State: "state", ZIP: "zip" };
+const addressCells = (place) => Object.fromEntries(Object.entries(ADDRESS_COLUMNS).map(([column, field]) => [column, place?.[field] || ""]));
+
+ipcMain.handle("contacts:export", async (event, ids) => {
+  const idSet = new Set(ids || []);
+  const list = loadList();
+  const columns = ["Name", "Organization", ...publicationColumns(list.publications), "Email Address", ...Object.keys(ADDRESS_COLUMNS), "Source"];
+  const rows = list.contacts
+    .filter((c) => idSet.has(c.id))
+    .map((c) => {
+      const h = list.householdById.get(c.householdId) || null;
+      return {
+        Name: c.name,
+        Organization: list.orgById.get(c.orgId)?.name || "",
+        ...publicationCells(list.publications, c, h),
+        "Email Address": c.email,
+        ...addressCells(h),
+        Source: c.sourceBatch,
+      };
+    });
+  return saveTable(columns, rows, { title: "Export people", defaultName: "mailing-list-people", sheetName: "People" });
+});
+
+// For importing back with "Each row is an organization".
+ipcMain.handle("orgs:export", async (event, ids) => {
+  const idSet = new Set(ids || []);
+  const list = loadList();
+  const columns = ["Organization", "Attention", ...publicationColumns(list.publications), "Email Address", ...Object.keys(ADDRESS_COLUMNS), "Members", "Source"];
+  const rows = list.orgs
+    .filter((o) => idSet.has(o.id))
+    .map((o) => ({
+      Organization: o.name,
+      Attention: o.attn,
+      ...publicationCells(list.publications, o, o),
+      "Email Address": o.email,
+      ...addressCells(o),
+      Members: (list.orgMembers.get(o.id) || []).length,
+      Source: o.sourceBatch,
+    }));
+  return saveTable(columns, rows, { title: "Export organizations", defaultName: "mailing-list-organizations", sheetName: "Organizations" });
+});
+
+// ---------------------------------------------------------------------------
+// Duplicates
+// ---------------------------------------------------------------------------
+
+// Pairs marked "not duplicates" or "keep separate": { kind, key } rows.
+function dismissedPairs() {
+  return new Set(store.list("reviewDismissed").map((d) => d.key));
+}
+
+function dismissPairs(kind, ids) {
+  const existing = dismissedPairs();
+  const rows = [];
+  for (let i = 0; i < ids.length; i++) {
+    for (let j = i + 1; j < ids.length; j++) {
+      const key = duplicates.pairKey(ids[i], ids[j]);
+      if (!existing.has(key)) {
+        existing.add(key);
+        rows.push({ kind, key });
+      }
+    }
+  }
+  if (rows.length) store.insertMany("reviewDismissed", rows);
+}
+
+function currentReview() {
+  const list = loadList();
+  return { list, ...duplicates.findDuplicates(list.contacts, list.households, list.orgs, dismissedPairs()) };
+}
+
+ipcMain.handle("review:counts", async () => {
+  const { duplicates: groups, sharedAddresses, orgDuplicates } = currentReview();
+  return { duplicates: groups.length, sharedAddresses: sharedAddresses.length, orgDuplicates: orgDuplicates.length };
+});
+
+ipcMain.handle("review:list", async () => {
+  const { list, duplicates: groups, sharedAddresses, orgDuplicates } = currentReview();
+  const household = (id) => (list.householdById.has(id) ? describeHousehold(list.householdById.get(id), list.membersOf.get(id) || [], list) : null);
+  const oldestFirst = (a, b) => new Date(a.createdAt) - new Date(b.createdAt);
+  return {
+    publications: list.publications,
+    duplicates: groups.map((g) => ({
+      contacts: g.ids
+        .map((id) => list.contactById.get(id))
+        .sort(oldestFirst)
+        .map((c) => ({ ...c, household: household(c.householdId), org: list.orgById.get(c.orgId) || null })),
+      pairs: g.pairs,
+    })),
+    sharedAddresses: sharedAddresses.map((g) => ({ households: g.householdIds.map(household).filter(Boolean) })),
+    orgDuplicates: orgDuplicates.map((g) => ({ orgs: g.ids.map((id) => describeOrg(list.orgById.get(id), list)).sort(oldestFirst), pairs: g.pairs })),
+  };
+});
+
+ipcMain.handle("review:dismiss", async (event, kind, ids) => {
+  dismissPairs(kind, ids || []);
+  return true;
+});
+
+// Folds duplicate people into one. `values` are the name, email and
+// organization picked on the Duplicates page; `householdId` is whose address
+// to keep (or null for none). They keep every newsletter any of them got by
+// email. Mailings that went to any of them now show the kept contact; one
+// that hasn't gone out yet sends them one copy.
+ipcMain.handle("contacts:merge", async (event, { keepId, removeIds, values, householdId }) => {
+  const list = loadList();
+  const keep = list.contactById.get(keepId);
+  const removing = (removeIds || []).filter((id) => id !== keepId && list.contactById.has(id));
+  if (!keep || !removing.length) throw new Error("Those contacts are no longer on the list.");
+  const group = [keep, ...removing.map((id) => list.contactById.get(id))];
+  if (householdId && !group.some((c) => c.householdId === householdId)) throw new Error("That address isn't one of theirs.");
+  const orgId = values.orgId && group.some((c) => c.orgId === values.orgId) ? values.orgId : null;
+  const removeSet = new Set(removing);
+  const now = new Date().toISOString();
+
+  store.mutate("mailingRecipients", (recipients) => {
+    const keptIn = new Set(recipients.filter((r) => r.contactId === keepId).map((r) => `${r.mailingId}|${r.channel}`));
+    const next = [];
+    for (const r of recipients) {
+      if (!removeSet.has(r.contactId)) next.push(r);
+      else if (r.status === "pending" && keptIn.has(`${r.mailingId}|${r.channel}`)) continue; // they'll get the kept contact's copy
+      else {
+        keptIn.add(`${r.mailingId}|${r.channel}`);
+        next.push({ ...r, contactId: keepId });
+      }
+    }
+    return next;
+  });
+  const emailSubs = combineSubs(group.map((c) => ({ subs: Object.fromEntries(Object.entries(c.subs || {}).map(([id, s]) => [id, { email: !!s.email }])) })));
+  store.update("contacts", keepId, {
+    name: cleanText(values.name),
+    email: cleanText(values.email),
+    orgId,
+    householdId: householdId || null,
+    subs: emailSubs,
+    updatedAt: now,
+  });
+  const householdsBefore = new Set(group.map((c) => c.householdId).filter(Boolean));
+  store.removeWhere("contacts", (c) => removeSet.has(c.id));
+  retirePlaces("household", emptyHouseholds(householdsBefore), null, list);
+  return true;
+});
+
+// Folds duplicate organizations into one: its name, attention line, email
+// and address are the ones picked (`addressFrom` is whose address); it gets
+// every newsletter any of them got, with the most copies any had; their
+// members all belong to it now.
+ipcMain.handle("orgs:merge", async (event, { keepId, removeIds, values, addressFrom }) => {
+  const list = loadList();
+  const keep = list.orgById.get(keepId);
+  const removing = (removeIds || []).filter((id) => id !== keepId && list.orgById.has(id));
+  if (!keep || !removing.length) throw new Error("Those organizations are no longer on the list.");
+  const group = [keep, ...removing.map((id) => list.orgById.get(id))];
+  const addressSource = group.find((o) => o.id === addressFrom) || keep;
+  const removeSet = new Set(removing);
+  const now = new Date().toISOString();
+  retirePlaces("org", removeSet, keepId, list);
+  store.update("orgs", keepId, {
+    name: cleanText(values.name) || keep.name,
+    attn: cleanText(values.attn),
+    email: cleanText(values.email),
+    ...Object.fromEntries(rules.ADDRESS_FIELDS.map((f) => [f, addressSource[f] || ""])),
+    subs: combineSubs(group),
+    updatedAt: now,
+  });
+  store.updateWhere("contacts", (c) => (removeSet.has(c.orgId) ? { orgId: keepId, updatedAt: now } : null));
+  return true;
 });
 
 // ---------------------------------------------------------------------------
@@ -168,47 +873,16 @@ ipcMain.handle("templates:delete", async (event, id) => store.remove("templates"
 
 ipcMain.handle("templates:pick-pdf", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: "Select the fillable PDF template",
+    title: "Select the PDF to attach",
     filters: [{ name: "PDF", extensions: ["pdf"] }],
     properties: ["openFile"],
   });
   if (result.canceled || result.filePaths.length === 0) return null;
   const srcPath = result.filePaths[0];
-  const destName = `${randomUUID()}.pdf`;
-  const destPath = path.join(store.getDataDir(), "pdf-templates", destName);
+  const destPath = path.join(store.getDataDir(), "pdf-templates", `${randomUUID()}.pdf`);
   fs.copyFileSync(srcPath, destPath);
   return { storedPath: destPath, originalName: path.basename(srcPath) };
 });
-
-// ---------------------------------------------------------------------------
-// Gravity Forms connections
-// ---------------------------------------------------------------------------
-
-ipcMain.handle("gf:list", async () =>
-  store.list("gravityForms").map((gf) => ({ ...gf, consumerSecret: undefined, hasSecret: !!gf.consumerSecret }))
-);
-
-ipcMain.handle("gf:test-connection", async (event, siteUrl, consumerKey, consumerSecret) =>
-  gravityForms.testConnection(siteUrl, consumerKey, consumerSecret)
-);
-
-ipcMain.handle("gf:create", async (event, data) => {
-  const row = store.insert("gravityForms", { ...data, consumerSecret: encryptSecret(data.consumerSecret) });
-  return { ...row, consumerSecret: undefined };
-});
-
-ipcMain.handle("gf:update", async (event, id, patch) => {
-  const next = { ...patch };
-  if (typeof next.consumerSecret === "string" && next.consumerSecret) {
-    next.consumerSecret = encryptSecret(next.consumerSecret);
-  } else {
-    delete next.consumerSecret;
-  }
-  const row = store.update("gravityForms", id, next);
-  return row && { ...row, consumerSecret: undefined };
-});
-
-ipcMain.handle("gf:delete", async (event, id) => store.remove("gravityForms", id));
 
 // ---------------------------------------------------------------------------
 // Settings (SMTP)
@@ -274,790 +948,500 @@ ipcMain.handle("settings:test-smtp", async () => {
 // Mailings
 // ---------------------------------------------------------------------------
 
-ipcMain.handle("mailings:list", async () => store.list("mailings"));
+// A mailing is one issue of one newsletter. It goes by email to each person
+// (and organization) checked for it by email, and by mail to each household
+// and organization checked for it by mail -- one bundle per address, however
+// many of the selection live there.
 
-ipcMain.handle("mailings:create", async (event, { name, templateId, paperTemplateId, gravityFormId, filterRules }) => {
-  const contacts = filterContacts(store.list("contacts"), filterRules);
-  const mailing = store.insert("mailings", {
-    name,
-    templateId,
-    paperTemplateId,
-    gravityFormId,
-    filterRules,
-    status: "draft",
-  });
-  const recipients = contacts.map((contact) => ({
-    mailingId: mailing.id,
-    contactId: contact.id,
-    channel: contact.email ? "email" : "paper",
-    responseToken: generateToken(),
-    status: "pending",
-    sentAt: null,
-    generatedFilePath: null,
-    error: null,
-  }));
-  store.insertMany("mailingRecipients", recipients);
-  return mailing;
-});
-
-function hydrateRecipients(mailingId) {
-  const recipients = store.list("mailingRecipients").filter((r) => r.mailingId === mailingId);
-  const contacts = store.list("contacts");
-  const contactById = new Map(contacts.map((c) => [c.id, c]));
-  const responses = store.list("responses");
-  return recipients.map((r) => {
-    const responsesForRecipient = responses.filter((resp) => resp.mailingRecipientId === r.id);
-    const latest = responsesForRecipient.sort((a, b) => new Date(b.receivedAt) - new Date(a.receivedAt))[0];
+// The people and organizations a mailing's filters pick out. Each is
+// filtered with their address, organization name and number of copies
+// alongside, so a filter can be on State as easily as on Name.
+function selectRecipients(filterRules, publicationId, list) {
+  const people = list.contacts.map((c) => {
+    const h = list.householdById.get(c.householdId);
     return {
-      ...r,
-      contact: contactById.get(r.contactId) || null,
-      response: latest || null,
+      ...c,
+      ...Object.fromEntries(rules.ADDRESS_FIELDS.map((f) => [f, h?.[f] || ""])),
+      orgName: list.orgById.get(c.orgId)?.name || "",
+      copies: rules.copiesFor(h, publicationId),
     };
   });
+  const orgs = list.orgs.map((o) => ({ ...o, orgName: o.name, name: o.attn, copies: rules.copiesFor(o, publicationId) }));
+  return {
+    people: filterContacts(people, filterRules).map((row) => list.contactById.get(row.id)),
+    orgs: filterContacts(orgs, filterRules).map((row) => list.orgById.get(row.id)),
+  };
 }
 
-ipcMain.handle("mailings:get", async (event, id) => {
-  const mailing = store.get("mailings", id);
-  if (!mailing) return null;
-  return { ...mailing, recipients: hydrateRecipients(id) };
+function planRecipients(selected, { publicationId, includeEmail, includeMail }, list) {
+  const households = [...new Set(selected.people.map((c) => c.householdId).filter((id) => list.householdById.has(id)))].map((id) => list.householdById.get(id));
+  return {
+    emailPeople: includeEmail ? selected.people.filter((c) => rules.getsEmail(c, publicationId)) : [],
+    emailOrgs: includeEmail ? selected.orgs.filter((o) => rules.getsEmail(o, publicationId)) : [],
+    mailHouseholds: includeMail ? households.filter((h) => rules.getsMail(h, publicationId)) : [],
+    mailOrgs: includeMail ? selected.orgs.filter((o) => rules.getsMail(o, publicationId)) : [],
+    households,
+  };
+}
+
+ipcMain.handle("mailings:preview", async (event, filterRules, options) => {
+  const list = loadList();
+  const { publicationId, includeEmail, includeMail } = options;
+  const selected = selectRecipients(filterRules, publicationId, list);
+  const plan = planRecipients(selected, options, list);
+  const addressee = (h) => describeHousehold(h, list.membersOf.get(h.id) || [], list).addressee || formatAddress(h) || "(no address)";
+  const covered = (c) => rules.coveredBy(list.orgById.get(c.orgId), publicationId);
+  const ownCopy = (c) => !!rules.sub(c, publicationId).email || !!rules.sub(list.householdById.get(c.householdId), publicationId).mail;
+  const listOf = (items, label) => ({ count: items.length, names: items.slice(0, 8).map(label) });
+  return {
+    emailPeople: plan.emailPeople.length,
+    emailOrgs: plan.emailOrgs.length,
+    mailHouseholds: plan.mailHouseholds.length,
+    mailOrgs: plan.mailOrgs.length,
+    copies: sum([...plan.mailHouseholds, ...plan.mailOrgs].map((place) => rules.copiesFor(place, publicationId))),
+    throughOrg: selected.people.filter((c) => covered(c) && !ownCopy(c)).length,
+    emailProblems: listOf(
+      includeEmail ? [...selected.people, ...selected.orgs].filter((r) => rules.sub(r, publicationId).email && !rules.getsEmail(r, publicationId)) : [],
+      (r) => r.name || r.attn || "(no name)"
+    ),
+    mailProblems: listOf(
+      includeMail ? [...plan.households, ...selected.orgs].filter((p) => rules.sub(p, publicationId).mail && !rules.getsMail(p, publicationId)) : [],
+      (p) => (list.orgById.has(p.id) ? p.name : addressee(p))
+    ),
+    notReceiving: selected.people.filter((c) => !ownCopy(c) && !covered(c)).length,
+  };
+});
+
+function publicationName(mailing, list) {
+  return list.publications.find((p) => p.id === mailing.publicationId)?.name || mailing.publicationName || "";
+}
+
+function mailingStats(mailing, recipients, list) {
+  const mine = recipients.filter((r) => r.mailingId === mailing.id);
+  const email = mine.filter((r) => r.channel === "email");
+  const mail = mine.filter((r) => r.channel === "mail");
+  const copies = (rows) => sum(rows.map((r) => recipientCopies(r, recipientPlace(r, list), mailing.publicationId)));
+  const mailed = mail.filter((r) => r.status === "sent");
+  return {
+    emailTotal: email.length,
+    emailSent: email.filter((r) => r.status === "sent").length,
+    emailFailed: email.filter((r) => r.status === "pending" && r.error).length,
+    mailTotal: mail.length,
+    mailOrgs: mail.filter((r) => r.orgId).length,
+    mailMailed: mailed.length,
+    copiesTotal: copies(mail),
+    copiesMailed: copies(mailed),
+    anySent: mine.some((r) => r.status === "sent"),
+  };
+}
+
+ipcMain.handle("mailings:list", async () => {
+  const recipients = store.list("mailingRecipients");
+  const list = loadList();
+  const templateById = new Map(store.list("templates").map((t) => [t.id, t]));
+  return store
+    .list("mailings")
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    .map((m) => ({
+      ...m,
+      publicationName: publicationName(m, list),
+      templateName: m.templateId ? templateById.get(m.templateId)?.name || "(deleted template)" : "",
+      stats: mailingStats(m, recipients, list),
+    }));
+});
+
+ipcMain.handle("mailings:create", async (event, { name, publicationId, templateId, filterRules, includeEmail, includeMail }) => {
+  const list = loadList();
+  const publication = list.publications.find((p) => p.id === publicationId);
+  if (!publication) throw new Error("Choose which newsletter this mailing is.");
+  if (!includeEmail && !includeMail) throw new Error("Choose email, mail, or both.");
+  const plan = planRecipients(selectRecipients(filterRules, publicationId, list), { publicationId, includeEmail, includeMail }, list);
+  const emailCount = plan.emailPeople.length + plan.emailOrgs.length;
+  if (emailCount + plan.mailHouseholds.length + plan.mailOrgs.length === 0) throw new Error(`No one in this selection is set up to get ${publication.name}.`);
+  if (emailCount && !templateId) throw new Error("Choose an email template for the email recipients.");
+
+  const mailing = store.insert("mailings", {
+    name,
+    publicationId,
+    publicationName: publication.name,
+    templateId: includeEmail ? templateId || null : null,
+    filterRules,
+    includeEmail: !!includeEmail,
+    includeMail: !!includeMail,
+    status: "draft",
+  });
+  const base = { mailingId: mailing.id, status: "pending", sentAt: null, error: null };
+  store.insertMany("mailingRecipients", [
+    ...plan.emailPeople.map((c) => ({ ...base, channel: "email", contactId: c.id })),
+    ...plan.emailOrgs.map((o) => ({ ...base, channel: "email", orgId: o.id })),
+    ...plan.mailHouseholds.map((h) => ({ ...base, channel: "mail", householdId: h.id })),
+    ...plan.mailOrgs.map((o) => ({ ...base, channel: "mail", orgId: o.id })),
+  ]);
+  return mailing;
 });
 
 ipcMain.handle("mailings:delete", async (event, id) => {
   const mailing = store.get("mailings", id);
   if (!mailing) return false;
-  if (mailing.status === "sent") throw new Error("This mailing has already been sent and can't be deleted.");
+  if (store.list("mailingRecipients").some((r) => r.mailingId === id && r.status === "sent")) {
+    throw new Error("This mailing has already gone out to some people and can't be deleted.");
+  }
   store.removeWhere("mailingRecipients", (r) => r.mailingId === id);
   store.remove("mailings", id);
   return true;
 });
 
+// The template, its PDF and the SMTP settings for one mailing's emails. The
+// PDF is read once here and attached to every email as-is, under the name it
+// had when it was picked on the Templates page.
 function loadSendContext(mailing) {
+  const emailTemplate = mailing.templateId ? store.get("templates", mailing.templateId) : null;
+  if (!emailTemplate) throw new Error("This mailing's email template no longer exists.");
+  let attachment = null;
+  if (emailTemplate.pdfPath) {
+    try {
+      attachment = { filename: emailTemplate.pdfOriginalName || "newsletter.pdf", content: fs.readFileSync(emailTemplate.pdfPath) };
+    } catch {
+      throw new Error(`The PDF for the "${emailTemplate.name}" template is missing from the data folder -- choose it again on the Templates page.`);
+    }
+  }
+  return { emailTemplate, attachment, smtpConfig: resolveSmtpConfig(), publicationId: mailing.publicationId };
+}
+
+// Who an email recipient is -- a person, or an organization (to whoever its
+// Attention line names) -- with the fields a template can fill in.
+function emailTarget(recipient, list, publicationId) {
+  if (recipient.orgId) {
+    const org = list.orgById.get(recipient.orgId);
+    if (!org) return null;
+    return {
+      email: org.email,
+      label: org.name,
+      fields: { ...org, name: org.attn || org.name, orgName: org.name, copies: rules.copiesFor(org, publicationId) },
+    };
+  }
+  const contact = list.contactById.get(recipient.contactId);
+  if (!contact) return null;
+  const h = list.householdById.get(contact.householdId);
   return {
-    emailTemplate: mailing.templateId ? store.get("templates", mailing.templateId) : null,
-    paperTemplate: mailing.paperTemplateId ? store.get("templates", mailing.paperTemplateId) : null,
-    gravityForm: mailing.gravityFormId ? store.get("gravityForms", mailing.gravityFormId) : null,
-    smtpConfig: resolveSmtpConfig(),
+    email: contact.email,
+    label: contactLabel(contact),
+    fields: {
+      ...contact,
+      ...Object.fromEntries(rules.ADDRESS_FIELDS.map((f) => [f, h?.[f] || ""])),
+      orgName: list.orgById.get(contact.orgId)?.name || "",
+      copies: rules.copiesFor(h, publicationId),
+    },
   };
 }
 
 // Builds one recipient's email from the mailing's email template as it is
-// now. The PDF is stamped fresh from the template's file on every call --
-// nothing from an earlier send is kept or reused -- so a send, a test, and a
-// resend all attach the same thing.
-async function composeEmail(contact, token, { emailTemplate, gravityForm }) {
-  if (!emailTemplate) throw new Error("No email template selected for this mailing.");
-  const link = gravityForm ? buildResponseLink(gravityForm, token) : "";
-  const extraContext = { form_link: link };
-  const subject = renderTemplate(emailTemplate.subject, contact, extraContext);
-  const bodyHtml = renderTemplate(emailTemplate.body, contact, extraContext);
-  const attachments = [];
-  if (emailTemplate.pdfPath) {
-    const templateBytes = fs.readFileSync(emailTemplate.pdfPath);
-    const stamped = await stampToken(templateBytes, token);
-    attachments.push({ filename: `form-${token}.pdf`, content: Buffer.from(stamped) });
-  }
-  return { subject, html: bodyHtml, text: htmlToPlainText(bodyHtml), attachments };
+// now, so a send, a test and a resend all match.
+function composeEmail(fields, { emailTemplate, attachment }) {
+  const html = renderTemplate(emailTemplate.body, fields, { html: true });
+  return {
+    subject: renderTemplate(emailTemplate.subject, fields),
+    html,
+    text: htmlToPlainText(html),
+    attachments: attachment ? [attachment] : [],
+  };
 }
 
-// Emails one recipient, or generates their paper letter, and records the
-// outcome on the recipient. Returns "sent" or "generated". A failure is saved
-// as the recipient's `error` (the Tracking page shows it as "Send failed",
-// with a way to fix the address and retry) and then rethrown.
-async function deliverToRecipient(recipient, contact, context) {
-  const { paperTemplate, gravityForm, smtpConfig } = context;
+// Emails one recipient and records the outcome. A failure is saved as the
+// recipient's `error` (the Delivery page shows it as "Send failed", with a
+// way to fix the address and retry) and then rethrown.
+async function emailRecipient(recipient, target, context) {
   try {
-    if (recipient.channel === "email") {
-      const message = await composeEmail(contact, recipient.responseToken, context);
-      await mailer.sendMail(smtpConfig, { to: contact.email, ...message });
-      store.update("mailingRecipients", recipient.id, { status: "sent", sentAt: new Date().toISOString(), error: null });
-      return "sent";
-    }
-    if (!paperTemplate) throw new Error("No paper template selected for this mailing.");
-    const link = gravityForm ? buildResponseLink(gravityForm, recipient.responseToken) : "";
-    const body = renderTemplate(paperTemplate.body, contact, { form_link: link });
-    const letterBytes = await generatePaperLetter(body, contact, recipient.responseToken);
-    const destPath = path.join(store.getDataDir(), "generated-letters", `${recipient.responseToken}.pdf`);
-    fs.writeFileSync(destPath, letterBytes);
-    store.update("mailingRecipients", recipient.id, {
-      status: "sent",
-      sentAt: new Date().toISOString(),
-      generatedFilePath: destPath,
-      error: null,
-    });
-    return "generated";
+    if (!target) throw new Error("They've been deleted from the mailing list.");
+    if (!rules.isValidEmail(target.email)) throw new Error("There's no usable email address for them.");
+    await mailer.sendMail(context.smtpConfig, { to: target.email, ...composeEmail(target.fields, context) });
+    store.update("mailingRecipients", recipient.id, { status: "sent", sentAt: new Date().toISOString(), error: null });
   } catch (err) {
     store.update("mailingRecipients", recipient.id, { error: err.message });
     throw err;
   }
 }
 
+function sendProgress(mailingId, done, total) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("mailings:progress", { mailingId, done, total });
+}
+
+// Guards against the same mailing being sent twice at once (a double click,
+// or navigating away and back mid-send and clicking again).
+const sendsInFlight = new Set();
+
 ipcMain.handle("mailings:send", async (event, mailingId) => {
   const mailing = store.get("mailings", mailingId);
   if (!mailing) throw new Error("Mailing not found.");
-  const context = loadSendContext(mailing);
-
-  const recipients = store.list("mailingRecipients").filter((r) => r.mailingId === mailingId && r.status === "pending");
-  const contactById = new Map(store.list("contacts").map((c) => [c.id, c]));
-
-  const results = { sent: 0, generated: 0, errors: [] };
-
-  for (const recipient of recipients) {
-    const contact = contactById.get(recipient.contactId);
-    if (!contact) continue;
-    try {
-      const outcome = await deliverToRecipient(recipient, contact, context);
-      results[outcome]++;
-    } catch (err) {
-      results.errors.push({ contactId: recipient.contactId, error: err.message });
+  if (sendsInFlight.has(mailingId)) throw new Error("This mailing is already sending.");
+  sendsInFlight.add(mailingId);
+  try {
+    const recipients = store.list("mailingRecipients").filter((r) => r.mailingId === mailingId && r.channel === "email" && r.status === "pending");
+    const results = { sent: 0, errors: [] };
+    if (recipients.length) {
+      const context = loadSendContext(mailing);
+      // Checked up front so a wrong password or unreachable server is one
+      // error here, rather than every recipient marked as a failed send.
+      try {
+        await mailer.verifyConnection(context.smtpConfig);
+      } catch (err) {
+        throw new Error(`Couldn't connect to the mail server (${err.message}). Check Settings and try again -- nothing was sent.`);
+      }
+      const list = loadList();
+      for (const [i, recipient] of recipients.entries()) {
+        sendProgress(mailingId, i, recipients.length);
+        const target = emailTarget(recipient, list, mailing.publicationId);
+        try {
+          await emailRecipient(recipient, target, context);
+          results.sent++;
+        } catch (err) {
+          results.errors.push({ name: target?.label || "(deleted)", error: err.message });
+        }
+      }
+      sendProgress(mailingId, recipients.length, recipients.length);
     }
+    store.update("mailings", mailingId, { status: "sent", sentAt: mailing.sentAt || new Date().toISOString() });
+    return results;
+  } finally {
+    sendsInFlight.delete(mailingId);
   }
-
-  store.update("mailings", mailingId, { status: "sent" });
-  return results;
 });
 
-// Sends one copy of a mailing's email template to the address configured in
-// Settings, without touching any recipient or the mailing's status -- lets
-// Kevin see exactly what a real send will look like before committing to it.
-// Renders against a real recipient's data when the mailing has one (so merge
-// fields show something realistic) but always delivers to the test address,
-// never the recipient's own.
+// Sends one copy of a mailing's email to the test address in Settings,
+// without touching any recipient or the mailing's status -- to see exactly
+// what a real send will look like before committing to it. Fills merge
+// fields from a real recipient when the mailing has one.
 ipcMain.handle("mailings:send-test", async (event, mailingId) => {
   const mailing = store.get("mailings", mailingId);
   if (!mailing) throw new Error("Mailing not found.");
   const testEmail = store.getSettings().testEmail;
   if (!testEmail) throw new Error("Set a test email address in Settings first.");
-  const emailTemplate = mailing.templateId ? store.get("templates", mailing.templateId) : null;
-  if (!emailTemplate) throw new Error("This mailing has no email template selected.");
-  const gravityForm = mailing.gravityFormId ? store.get("gravityForms", mailing.gravityFormId) : null;
-  const smtpConfig = resolveSmtpConfig();
-
-  const emailRecipients = store.list("mailingRecipients").filter((r) => r.mailingId === mailingId && r.channel === "email");
-  const contactById = new Map(store.list("contacts").map((c) => [c.id, c]));
-  const sampleRecipient = emailRecipients[0];
-  const sampleContact = sampleRecipient ? contactById.get(sampleRecipient.contactId) : null;
-  const contact = sampleContact || {
-    externalId: "TEST-1",
+  const context = loadSendContext(mailing);
+  const list = loadList();
+  const sample = store.list("mailingRecipients").find((r) => r.mailingId === mailingId && r.channel === "email");
+  const fields = (sample && emailTarget(sample, list, mailing.publicationId)?.fields) || {
+    ...BLANK_ADDRESS,
+    orgName: "Sample Church",
     name: "Test Recipient",
     email: testEmail,
     addressLine1: "123 Sample St",
-    addressLine2: "",
     city: "Sampleton",
-    state: "ST",
+    state: "PA",
     zip: "00000",
-    extra: {},
+    copies: 1,
   };
-  const token = sampleRecipient ? sampleRecipient.responseToken : generateToken();
-
-  const message = await composeEmail(contact, token, { emailTemplate, gravityForm });
-  await mailer.sendMail(smtpConfig, { to: testEmail, ...message, subject: `[TEST] ${message.subject}` });
+  const message = composeEmail(fields, context);
+  await mailer.sendMail(context.smtpConfig, { to: testEmail, ...message, subject: `[TEST] ${message.subject}` });
   return { to: testEmail };
 });
 
+ipcMain.handle("mailings:export-addresses", async (event, mailingId) => {
+  const ids = store.list("mailingRecipients").filter((r) => r.mailingId === mailingId && r.channel === "mail").map((r) => r.id);
+  return exportMailingAddresses(ids);
+});
+
 // ---------------------------------------------------------------------------
-// Tracking
+// Delivery (each mailing's recipients)
 // ---------------------------------------------------------------------------
 
-ipcMain.handle("tracking:list", async (event, mailingId) => {
-  const recipients = mailingId
-    ? store.list("mailingRecipients").filter((r) => r.mailingId === mailingId)
-    : store.list("mailingRecipients");
-  const contacts = new Map(store.list("contacts").map((c) => [c.id, c]));
-  const mailings = new Map(store.list("mailings").map((m) => [m.id, m]));
-  const responses = store.list("responses");
+ipcMain.handle("delivery:list", async (event, mailingId) => {
+  const recipients = store.list("mailingRecipients").filter((r) => !mailingId || r.mailingId === mailingId);
+  const list = loadList();
+  const mailingById = new Map(store.list("mailings").map((m) => [m.id, m]));
   return recipients.map((r) => {
-    const responsesForRecipient = responses.filter((resp) => resp.mailingRecipientId === r.id);
-    const latest = responsesForRecipient.sort((a, b) => new Date(b.receivedAt) - new Date(a.receivedAt))[0];
-    return {
-      ...r,
-      contact: contacts.get(r.contactId) || null,
-      mailingName: mailings.get(r.mailingId)?.name || "",
-      response: latest || null,
-      attachments: recipientAttachments(responsesForRecipient),
-    };
-  });
-});
-
-ipcMain.handle("tracking:pick-attachment", async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: "Select the returned form (PDF or scan)",
-    filters: [
-      { name: "PDF or scan", extensions: ["pdf", "jpg", "jpeg", "png", "tif", "tiff"] },
-      { name: "All files", extensions: ["*"] },
-    ],
-    properties: ["openFile", "multiSelections"],
-  });
-  if (result.canceled || result.filePaths.length === 0) return null;
-  return result.filePaths;
-});
-
-// Copies files into the data folder, so a response keeps them even if the
-// originals (say, in Downloads) are moved or deleted.
-function storeAttachments(filePaths) {
-  const addedAt = new Date().toISOString();
-  return (filePaths || []).map((src) => {
-    const dest = path.join(store.getDataDir(), "attachments", `${randomUUID()}${path.extname(src)}`);
-    fs.copyFileSync(src, dest);
-    return { path: dest, name: path.basename(src), addedAt };
-  });
-}
-
-// A response's files. Ones recorded before a response could hold several
-// have at most one, as `attachmentPath`, and no original file name.
-function responseAttachments(resp) {
-  if (resp.attachments) return resp.attachments;
-  if (!resp.attachmentPath) return [];
-  return [{ path: resp.attachmentPath, name: `Attached file${path.extname(resp.attachmentPath)}`, addedAt: resp.receivedAt }];
-}
-
-// Every file on any of a recipient's responses, oldest first -- a PDF
-// emailed after a web submission is on a different response than the one
-// whose answers are shown.
-function recipientAttachments(responsesForRecipient) {
-  return responsesForRecipient
-    .flatMap((resp) => responseAttachments(resp).map((file) => ({ ...file, responseId: resp.id })))
-    .sort((a, b) => new Date(a.addedAt) - new Date(b.addedAt));
-}
-
-ipcMain.handle("tracking:mark-received", async (event, recipientId, { channel, notes, attachmentPaths, recordedBy }) => {
-  const recipient = store.get("mailingRecipients", recipientId);
-  if (!recipient) throw new Error("Recipient not found.");
-
-  const response = store.insert("responses", {
-    mailingRecipientId: recipientId,
-    channel,
-    receivedAt: new Date().toISOString(),
-    data: null,
-    gfEntryId: null,
-    attachments: storeAttachments(attachmentPaths),
-    notes: notes || "",
-    recordedBy: recordedBy || "",
-  });
-  store.update("mailingRecipients", recipientId, { status: "responded" });
-  return response;
-});
-
-// Paper recipients go to "sent" as soon as their letter PDF is generated, but
-// that doesn't mean it's actually in the mail yet -- mailedAt records when the
-// physical copy went out. Takes an array so the tracking page can mark a whole
-// filtered batch at once. Email and already-responded recipients are skipped.
-// A still-pending recipient (e.g. mailed from the exported address list
-// without generating letters) is moved to "sent" too, so a later send of the
-// mailing doesn't treat it as still needing to go out.
-ipcMain.handle("tracking:mark-mailed", async (event, recipientIds) => {
-  const ids = new Set(recipientIds || []);
-  const now = new Date().toISOString();
-  const updated = store.updateWhere("mailingRecipients", (recipient) => {
-    if (!ids.has(recipient.id)) return null;
-    if (recipient.channel !== "paper" || recipient.status === "responded" || recipient.mailedAt) return null;
-    const patch = { mailedAt: now };
-    if (recipient.status === "pending") {
-      patch.status = "sent";
-      patch.sentAt = recipient.sentAt || now;
+    const mailing = mailingById.get(r.mailingId);
+    const base = { ...r, mailingName: mailing?.name || "", publicationName: mailing ? publicationName(mailing, list) : "" };
+    if (r.orgId) {
+      const org = recipientOrg(r, list);
+      return { ...base, org, orgDeleted: !list.orgById.has(r.orgId), copies: recipientCopies(r, org, mailing?.publicationId) };
     }
-    return patch;
+    if (r.channel === "mail") {
+      const household = recipientHousehold(r, list);
+      return { ...base, household, householdDeleted: !list.householdById.has(r.householdId), copies: recipientCopies(r, household, mailing?.publicationId) };
+    }
+    const contact = recipientContact(r, list);
+    return { ...base, contact, orgName: list.orgById.get(contact?.orgId)?.name || "", contactDeleted: !list.contactById.has(r.contactId) };
   });
-  return { updated };
 });
 
-// Records (or clears) when a response was entered into the office's own
-// records software -- a manual step done after each response comes in.
-// Only applies to recipients who have responded. Takes an array like
-// tracking:mark-mailed.
-ipcMain.handle("tracking:set-entered", async (event, recipientIds, entered) => {
+// Addresses go from "to mail" to "mailed" here. The number of copies is
+// recorded at this point, so later edits to the list don't rewrite what this
+// mailing sent. Takes an array so the Delivery page can mark a whole
+// filtered batch at once.
+ipcMain.handle("delivery:mark-mailed", async (event, recipientIds) => {
   const ids = new Set(recipientIds || []);
+  const list = loadList();
+  const mailingById = new Map(store.list("mailings").map((m) => [m.id, m]));
   const now = new Date().toISOString();
-  const updated = store.updateWhere("mailingRecipients", (recipient) => {
-    if (!ids.has(recipient.id) || recipient.status !== "responded") return null;
-    if (entered ? recipient.enteredAt : !recipient.enteredAt) return null;
-    return { enteredAt: entered ? now : null };
+  const updated = store.updateWhere("mailingRecipients", (r) => {
+    if (!ids.has(r.id) || r.channel !== "mail" || r.status !== "pending") return null;
+    return { status: "sent", sentAt: now, copies: rules.copiesFor(recipientPlace(r, list), mailingById.get(r.mailingId)?.publicationId) };
   });
   return { updated };
 });
 
-// Undoes tracking:mark-mailed. A paper recipient with no generated letter can
-// only have reached "sent" by being marked mailed, so it goes back to pending.
-ipcMain.handle("tracking:unmark-mailed", async (event, recipientId) => {
+ipcMain.handle("delivery:unmark-mailed", async (event, recipientId) => {
   const recipient = store.get("mailingRecipients", recipientId);
-  if (!recipient) throw new Error("Recipient not found.");
-  const patch = { mailedAt: null };
-  if (recipient.status === "sent" && !recipient.generatedFilePath) {
-    patch.status = "pending";
-    patch.sentAt = null;
-  }
-  return store.update("mailingRecipients", recipientId, patch);
+  if (!recipient || recipient.channel !== "mail") throw new Error("Recipient not found.");
+  return store.update("mailingRecipients", recipientId, { status: "pending", sentAt: null, copies: null });
 });
 
-// Drops one person from a mailing, along with any responses recorded for
-// them. Stored attachment files are left on disk rather than deleted.
-ipcMain.handle("tracking:remove-recipient", async (event, recipientId) => {
-  const recipient = store.get("mailingRecipients", recipientId);
-  if (!recipient) throw new Error("Recipient not found.");
-  store.removeWhere("responses", (resp) => resp.mailingRecipientId === recipientId);
-  store.remove("mailingRecipients", recipientId);
+ipcMain.handle("delivery:remove-recipient", async (event, recipientId) => {
+  if (!store.remove("mailingRecipients", recipientId)) throw new Error("Recipient not found.");
   return true;
 });
 
-// Retries one recipient whose send failed, after saving a corrected email
-// address on their contact. A blank address switches them to a paper letter
-// instead -- e.g. a contact imported with "N/A" in the email column.
-ipcMain.handle("tracking:retry-send", async (event, recipientId, email) => {
+// Retries one recipient whose email failed, after saving a corrected address.
+// A blank address mails them a copy instead -- to their household, or an
+// organization's own address -- or, if that address is already getting this
+// mailing by mail, just takes them off the email side.
+ipcMain.handle("delivery:retry-send", async (event, recipientId, email) => {
   const recipient = store.get("mailingRecipients", recipientId);
-  if (!recipient) throw new Error("Recipient not found.");
+  if (!recipient || recipient.channel !== "email") throw new Error("Recipient not found.");
   if (recipient.status !== "pending") throw new Error("This recipient has already been sent.");
   const mailing = store.get("mailings", recipient.mailingId);
-  const contact = store.get("contacts", recipient.contactId);
-  if (!mailing || !contact) throw new Error("This recipient's mailing or contact no longer exists.");
+  const list = loadList();
+  const isOrg = !!recipient.orgId;
+  const record = isOrg ? list.orgById.get(recipient.orgId) : list.contactById.get(recipient.contactId);
+  if (!mailing || !record) throw new Error("This recipient's mailing or contact no longer exists.");
+  const pubId = mailing.publicationId;
+  const now = new Date().toISOString();
+  const collection = isOrg ? "orgs" : "contacts";
 
-  const cleaned = String(email || "").trim();
-  const nextContact = cleaned === contact.email ? contact : store.update("contacts", contact.id, { email: cleaned });
-  const channel = cleaned ? "email" : "paper";
-  const nextRecipient = channel === recipient.channel ? recipient : store.update("mailingRecipients", recipient.id, { channel });
-  const outcome = await deliverToRecipient(nextRecipient, nextContact, loadSendContext(mailing));
-  return { outcome };
+  const cleaned = cleanText(email);
+  if (!cleaned) {
+    const place = isOrg ? record : list.householdById.get(record.householdId);
+    if (!rules.hasMailingAddress(place)) {
+      throw new Error("There's no mailing address on file for them. Add one on the Mailing List first, or enter an email address.");
+    }
+    store.update(collection, record.id, { email: "", subs: mergeSubs(record.subs, { [pubId]: { email: false } }), updatedAt: now });
+    const placeCollection = isOrg ? "orgs" : "households";
+    const fresh = store.get(placeCollection, place.id);
+    const copies = rules.copiesFor(fresh, pubId) || 1;
+    store.update(placeCollection, place.id, { subs: mergeSubs(fresh.subs, { [pubId]: { mail: true, copies } }), updatedAt: now });
+    const placeKey = isOrg ? "orgId" : "householdId";
+    const alreadyMailed = store.list("mailingRecipients").some((r) => r.mailingId === mailing.id && r.channel === "mail" && r[placeKey] === place.id);
+    if (alreadyMailed) {
+      store.remove("mailingRecipients", recipient.id);
+      return { outcome: "removed" };
+    }
+    store.update("mailingRecipients", recipient.id, { channel: "mail", contactId: null, [placeKey]: place.id, error: null });
+    return { outcome: "mail" };
+  }
+
+  if (cleaned !== record.email || !rules.sub(record, pubId).email) {
+    store.update(collection, record.id, { email: cleaned, subs: mergeSubs(record.subs, { [pubId]: { email: true } }), updatedAt: now });
+  }
+  await emailRecipient(recipient, emailTarget(recipient, loadList(), pubId), loadSendContext(mailing));
+  return { outcome: "sent" };
 });
 
-// Emails the form again to recipients who were already sent it but haven't
-// responded -- it went to spam, say, or the first copy had a problem. Uses
-// the mailing's email template and PDF as they are now, with the recipient's
-// same response token, so their link and Ref code still match them. sentAt
-// keeps the original send; resentAt records the latest resend. Takes an array
-// like tracking:mark-mailed; paper, unsent, and responded recipients are
-// skipped. A failure is only reported back, not saved -- the recipient was
-// still sent the first time.
-ipcMain.handle("tracking:resend", async (event, recipientIds) => {
+// Emails a mailing again to recipients who were already sent it -- it went
+// to spam, say, or the first copy had the wrong PDF. Uses the email template
+// and PDF as they are now. sentAt keeps the original send; resentAt records
+// the latest resend. A failure is only reported back, not saved -- the
+// recipient was still sent the first time.
+ipcMain.handle("delivery:resend", async (event, recipientIds) => {
   const ids = new Set(recipientIds || []);
-  const recipients = store
-    .list("mailingRecipients")
-    .filter((r) => ids.has(r.id) && r.channel === "email" && r.status === "sent");
-  const contactById = new Map(store.list("contacts").map((c) => [c.id, c]));
+  const recipients = store.list("mailingRecipients").filter((r) => ids.has(r.id) && r.channel === "email" && r.status === "sent");
+  const list = loadList();
   const mailingById = new Map(store.list("mailings").map((m) => [m.id, m]));
   const contextByMailing = new Map();
 
   const results = { sent: 0, errors: [] };
-  for (const recipient of recipients) {
-    const contact = contactById.get(recipient.contactId);
+  for (const [i, recipient] of recipients.entries()) {
+    sendProgress(recipient.mailingId, i, recipients.length);
+    const mailing = mailingById.get(recipient.mailingId);
+    const target = mailing && emailTarget(recipient, list, mailing.publicationId);
     try {
-      const mailing = mailingById.get(recipient.mailingId);
-      if (!mailing || !contact) throw new Error("This recipient's mailing or contact no longer exists.");
-      if (!contact.email) throw new Error("This contact no longer has an email address.");
+      if (!mailing || !target) throw new Error("This recipient's mailing or contact no longer exists.");
+      if (!rules.isValidEmail(target.email)) throw new Error("There's no longer a usable email address for them.");
       if (!contextByMailing.has(mailing.id)) contextByMailing.set(mailing.id, loadSendContext(mailing));
       const context = contextByMailing.get(mailing.id);
-      const message = await composeEmail(contact, recipient.responseToken, context);
-      await mailer.sendMail(context.smtpConfig, { to: contact.email, ...message });
+      await mailer.sendMail(context.smtpConfig, { to: target.email, ...composeEmail(target.fields, context) });
       store.update("mailingRecipients", recipient.id, { resentAt: new Date().toISOString() });
       results.sent++;
     } catch (err) {
-      results.errors.push({ recipientId: recipient.id, name: contact?.name || "", error: err.message });
+      results.errors.push({ recipientId: recipient.id, name: target?.label || "(deleted)", error: err.message });
     }
   }
   return results;
 });
 
-// Both exports take the recipient IDs currently shown on the Tracking page, so
-// what's exported always matches the page's mailing/status/channel/search
-// filters rather than re-deriving the filter here.
 function recipientsByIds(recipientIds) {
   const ids = new Set(recipientIds || []);
   return store.list("mailingRecipients").filter((r) => ids.has(r.id));
 }
 
-ipcMain.handle("tracking:export", async (event, recipientIds, format) => {
-  const recipients = recipientsByIds(recipientIds);
-  const contacts = new Map(store.list("contacts").map((c) => [c.id, c]));
-  const responses = store.list("responses");
+const DELIVERY_EXPORT_COLUMNS = ["Mailing", "Newsletter", "Name", "Organization", "Sent By", "Status", "Email Address", ...Object.keys(ADDRESS_COLUMNS), "Copies", "Sent / Mailed", "Resent", "Error"];
 
-  const rows = recipients.map((r) => {
-    const contact = contacts.get(r.contactId) || {};
-    const responsesForRecipient = responses.filter((resp) => resp.mailingRecipientId === r.id);
-    const latest = responsesForRecipient.sort((a, b) => new Date(b.receivedAt) - new Date(a.receivedAt))[0];
-    return {
-      Name: contact.name || "",
-      Email: contact.email || "",
-      Channel: r.channel,
-      Status: r.status,
-      "Sent At": r.sentAt || "",
-      "Resent At": r.resentAt || "",
-      "Mailed At": r.mailedAt || "",
-      "Responded Via": latest ? latest.channel : "",
-      "Responded At": latest ? latest.receivedAt : "",
-      "Entered At": r.enteredAt || "",
-      Token: r.responseToken,
-    };
-  });
+function deliveryStatusLabel(r) {
+  if (r.channel === "mail") return r.status === "sent" ? "Mailed" : "To mail";
+  if (r.status === "sent") return "Emailed";
+  return r.error ? "Send failed" : "Not sent yet";
+}
 
-  const result = await dialog.showSaveDialog(mainWindow, {
-    title: "Export tracking table",
-    defaultPath: `sendnewsletters-export.${format}`,
-    filters:
-      format === "xlsx" ? [{ name: "Excel", extensions: ["xlsx"] }] : [{ name: "CSV", extensions: ["csv"] }],
-  });
-  if (result.canceled || !result.filePath) return null;
-
-  if (format === "xlsx") {
-    const XLSX = require("xlsx");
-    const worksheet = XLSX.utils.json_to_sheet(rows);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Tracking");
-    XLSX.writeFile(workbook, result.filePath);
-  } else {
-    const Papa = require("papaparse");
-    fs.writeFileSync(result.filePath, Papa.unparse(rows), "utf8");
+// Who a recipient row is, for exports and labels: an organization by name
+// (attention to whoever it names), a household by everyone who lives there,
+// a person by name.
+function recipientLabel(r, list) {
+  if (r.orgId) {
+    const org = recipientOrg(r, list) || {};
+    return { name: org.attn || "", organization: org.name || "", place: org, email: org.email || "" };
   }
-  return result.filePath;
-});
-
-ipcMain.handle("tracking:export-paper-addresses", async (event, recipientIds) => {
-  const recipients = recipientsByIds(recipientIds).filter((r) => r.channel === "paper");
-  const contacts = new Map(store.list("contacts").map((c) => [c.id, c]));
-
-  const rows = recipients.map((r) => {
-    const contact = contacts.get(r.contactId);
-    return {
-      ID: contact?.externalId || "",
-      "Contact ID": r.contactId || "",
-      Name: contact?.name || "",
-      "Address Line 1": contact?.addressLine1 || "",
-      "Address Line 2": contact?.addressLine2 || "",
-      City: contact?.city || "",
-      State: contact?.state || "",
-      Zip: contact?.zip || "",
-    };
-  });
-
-  const result = await dialog.showSaveDialog(mainWindow, {
-    title: "Export paper mailing addresses",
-    defaultPath: "sendnewsletters-paper-addresses.csv",
-    filters: [{ name: "CSV", extensions: ["csv"] }],
-  });
-  if (result.canceled || !result.filePath) return null;
-
-  const Papa = require("papaparse");
-  fs.writeFileSync(result.filePath, Papa.unparse(rows), "utf8");
-  return result.filePath;
-});
-
-// ---------------------------------------------------------------------------
-// Gravity Forms sync
-// ---------------------------------------------------------------------------
-
-// The entry's page in the WordPress admin, for seeing it exactly as
-// Gravity Forms shows it.
-function gfEntryUrl(gf, entryId) {
-  return `${gf.siteUrl.replace(/\/+$/, "")}/wp-admin/admin.php?page=gf_entries&view=entry&id=${encodeURIComponent(gf.formId)}&lid=${encodeURIComponent(entryId)}`;
-}
-
-function cacheFormFields(gravityFormId, form) {
-  store.upsertMany("gfForms", "gravityFormId", [
-    { gravityFormId, fields: entryView.trimFormFields(form), fetchedAt: new Date().toISOString() },
-  ]);
-}
-
-function recordWebResponse(recipientId, { entry, entryId, submittedAt, matchedBy, memberIdEntered }) {
-  store.insert("responses", {
-    mailingRecipientId: recipientId,
-    channel: "web",
-    receivedAt: (submittedAt || new Date()).toISOString(),
-    data: entry,
-    gfEntryId: entryId,
-    matchedBy,
-    memberIdEntered: memberIdEntered || "",
-    attachments: [],
-    notes: "",
-    recordedBy: matchedBy === "manual" ? "manual-review" : "gravity-forms-sync",
-  });
-  // Every submission is kept, including a second one from someone who
-  // already responded (often a correction). If their response was already
-  // entered into the records software, this one hasn't been -- so it goes
-  // back in the "not yet entered" queue, remembering when the earlier one was.
-  const recipient = store.get("mailingRecipients", recipientId);
-  const patch = { status: "responded" };
-  if (recipient?.enteredAt) {
-    patch.enteredAt = null;
-    patch.previousEnteredAt = recipient.enteredAt;
+  if (r.channel === "mail") {
+    const household = recipientHousehold(r, list) || {};
+    return { name: household.addressee || "", organization: "", place: household, email: "" };
   }
-  store.update("mailingRecipients", recipientId, patch);
+  const contact = recipientContact(r, list) || {};
+  return { name: contact.name || "", organization: list.orgById.get(contact.orgId)?.name || "", place: list.householdById.get(contact.householdId), email: contact.email || "" };
 }
 
-async function syncGravityForms() {
-  const summary = { matched: 0, needsReview: 0, errors: [] };
-  const mailings = store.list("mailings");
-  const contactById = new Map(store.list("contacts").map((c) => [c.id, c]));
-
-  for (const gf of store.list("gravityForms")) {
-    if (!gf.formId || (!gf.tokenFieldId && !gf.memberIdFieldId)) continue;
-    const linkedMailings = new Map(mailings.filter((m) => m.gravityFormId === gf.id).map((m) => [m.id, m]));
-    if (linkedMailings.size === 0) continue;
-    const recipients = store.list("mailingRecipients").filter((r) => linkedMailings.has(r.mailingId));
-    if (recipients.length === 0) continue;
-
-    const config = { ...gf, consumerSecret: decryptSecret(gf.consumerSecret) };
-    const since = new Date(Math.min(...[...linkedMailings.values()].map((m) => new Date(m.createdAt).getTime())));
-    let entries;
-    try {
-      entries = await gravityForms.fetchEntries(config, since);
-    } catch (err) {
-      console.error(`Gravity Forms sync failed for "${gf.name}":`, err.message);
-      summary.errors.push(`${gf.name}: ${err.message}`);
-      continue;
-    }
-    // Used to show who an unmatched entry is from and, cached, to label
-    // answers on the Responses page -- so failing to load it shouldn't stop
-    // the sync.
-    const form = await gravityForms.fetchForm(config).catch(() => null);
-    if (form) cacheFormFields(gf.id, form);
-
-    const recorded = new Set(store.list("responses").filter((r) => r.gfEntryId).map((r) => r.gfEntryId));
-    const candidates = recipients.map((recipient) => ({
-      recipient,
-      memberId: contactById.get(recipient.contactId)?.externalId || "",
-      mailingCreatedAt: linkedMailings.get(recipient.mailingId).createdAt,
-    }));
-    const { matches, unmatched } = gravityForms.matchEntries(
-      entries.filter((e) => !recorded.has(String(e.id))),
-      config,
-      candidates
-    );
-
-    for (const match of matches) {
-      recordWebResponse(match.recipient.id, match);
-      summary.matched++;
-    }
-
-    // The review list for this form is rebuilt from whatever still doesn't
-    // match, so entries resolved since the last sync drop off; each entry
-    // keeps its id and dismissed flag from before.
-    const previous = new Map(store.list("gfUnmatched").filter((u) => u.gravityFormId === gf.id).map((u) => [u.gfEntryId, u]));
-    const reviewRows = unmatched.map(({ entry, entryId, submittedAt, memberIdEntered, suggestions }) => {
-      const prior = previous.get(entryId);
-      const who = form ? gravityForms.summarizeEntry(entry, form) : { name: prior?.name || "", email: prior?.email || "" };
-      return {
-        ...(prior && { id: prior.id, createdAt: prior.createdAt }),
-        gravityFormId: gf.id,
-        gfEntryId: entryId,
-        submittedAt: submittedAt ? submittedAt.toISOString() : null,
-        memberIdEntered,
-        name: who.name,
-        email: who.email,
-        suggestedRecipientIds: suggestions.map((r) => r.id),
-        dismissed: !!prior?.dismissed,
-        entry,
-      };
-    });
-    store.removeWhere("gfUnmatched", (u) => u.gravityFormId === gf.id);
-    store.insertMany("gfUnmatched", reviewRows);
-    summary.needsReview += reviewRows.filter((r) => !r.dismissed).length;
-  }
-  return summary;
-}
-
-// The 5-minute timer and the "Sync now" button can overlap; both would read
-// the same already-recorded entries and record a new one twice.
-let syncInFlight = null;
-function runSync() {
-  if (!syncInFlight) syncInFlight = syncGravityForms().finally(() => (syncInFlight = null));
-  return syncInFlight;
-}
-
-ipcMain.handle("sync:run", async () => runSync());
-
-function describeRecipient(recipient, contactById, mailingById) {
-  const contact = contactById.get(recipient.contactId);
-  return {
-    recipientId: recipient.id,
-    name: contact?.name || "",
-    memberId: contact?.externalId || "",
-    mailingName: mailingById.get(recipient.mailingId)?.name || "",
-    responded: recipient.status === "responded",
-  };
-}
-
-// Gravity Forms entries the sync couldn't match to anyone, for a person to
-// match by hand. `choices` lists, per form, everyone in its mailings --
-// including people who already responded, since a repeat submission with a
-// mistyped ID is theirs too.
-ipcMain.handle("gf:review-list", async () => {
-  const connections = new Map(store.list("gravityForms").map((g) => [g.id, g]));
-  const items = store.list("gfUnmatched").filter((u) => !u.dismissed && connections.has(u.gravityFormId));
-  const mailings = store.list("mailings");
-  const mailingById = new Map(mailings.map((m) => [m.id, m]));
-  const contactById = new Map(store.list("contacts").map((c) => [c.id, c]));
-  const recipients = store.list("mailingRecipients");
-  const recipientById = new Map(recipients.map((r) => [r.id, r]));
-
-  const choices = {};
-  for (const gfId of new Set(items.map((u) => u.gravityFormId))) {
-    choices[gfId] = recipients
-      .filter((r) => mailingById.get(r.mailingId)?.gravityFormId === gfId)
-      .map((r) => describeRecipient(r, contactById, mailingById))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }
-
-  return {
-    choices,
-    items: items
-      .sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt))
-      .map((u) => {
-        const gf = connections.get(u.gravityFormId);
-        return {
-          id: u.id,
-          gravityFormId: u.gravityFormId,
-          formName: gf.name,
-          memberIdFieldSet: !!gf.memberIdFieldId,
-          entryUrl: gfEntryUrl(gf, u.gfEntryId),
-          submittedAt: u.submittedAt,
-          memberIdEntered: u.memberIdEntered,
-          name: u.name,
-          email: u.email,
-          suggestions: (u.suggestedRecipientIds || [])
-            .map((id) => recipientById.get(id))
-            .filter(Boolean)
-            .map((r) => describeRecipient(r, contactById, mailingById)),
-        };
-      }),
-  };
-});
-
-ipcMain.handle("gf:review-assign", async (event, reviewId, recipientId) => {
-  const item = store.get("gfUnmatched", reviewId);
-  if (!item) throw new Error("This entry is no longer waiting for review -- try syncing again.");
-  const recipient = store.get("mailingRecipients", recipientId);
-  if (!recipient) throw new Error("Recipient not found.");
-  recordWebResponse(recipient.id, {
-    entry: item.entry,
-    entryId: item.gfEntryId,
-    submittedAt: item.submittedAt ? new Date(item.submittedAt) : null,
-    matchedBy: "manual",
-    memberIdEntered: item.memberIdEntered,
-  });
-  store.remove("gfUnmatched", item.id);
-  return true;
-});
-
-ipcMain.handle("gf:review-dismiss", async (event, reviewId) => {
-  if (!store.update("gfUnmatched", reviewId, { dismissed: true })) throw new Error("Entry not found.");
-  return true;
-});
-
-// ---------------------------------------------------------------------------
-// Responses (reading returned forms to enter them into the records software)
-// ---------------------------------------------------------------------------
-
-// The response shown for a recipient: their Gravity Forms submission if they
-// have one, since that's the one with answers to read; otherwise the latest.
-function pickResponse(responsesForRecipient) {
-  const newestFirst = [...responsesForRecipient].sort((a, b) => new Date(b.receivedAt) - new Date(a.receivedAt));
-  return newestFirst.find((r) => r.data && r.gfEntryId) || newestFirst[0] || null;
-}
-
-// A form's field definitions, from the copy the sync caches -- or fetched
-// now if this form hasn't been synced since that cache existed. null if
-// neither works; the Responses page then labels answers by field ID.
-async function loadFormFields(gf) {
-  const cached = store.list("gfForms").find((f) => f.gravityFormId === gf.id);
-  if (cached) return cached.fields;
-  try {
-    const form = await gravityForms.fetchForm({ ...gf, consumerSecret: decryptSecret(gf.consumerSecret) });
-    cacheFormFields(gf.id, form);
-    return entryView.trimFormFields(form);
-  } catch (err) {
-    console.error(`Couldn't load the form definition for "${gf.name}":`, err.message);
-    return null;
-  }
-}
-
-// Everyone who has responded, oldest response first -- the order to work
-// through them in.
-ipcMain.handle("responses:list", async () => {
-  const contactById = new Map(store.list("contacts").map((c) => [c.id, c]));
+// Both exports take the recipient IDs currently shown on the Delivery page,
+// so what's exported always matches the page's filters.
+ipcMain.handle("delivery:export", async (event, recipientIds) => {
+  const list = loadList();
   const mailingById = new Map(store.list("mailings").map((m) => [m.id, m]));
-  const responsesByRecipient = new Map();
-  for (const resp of store.list("responses")) {
-    if (!responsesByRecipient.has(resp.mailingRecipientId)) responsesByRecipient.set(resp.mailingRecipientId, []);
-    responsesByRecipient.get(resp.mailingRecipientId).push(resp);
-  }
-  return store
-    .list("mailingRecipients")
-    .filter((r) => r.status === "responded")
+  const rows = recipientsByIds(recipientIds).map((r) => {
+    const mailing = mailingById.get(r.mailingId);
+    const who = recipientLabel(r, list);
+    return {
+      Mailing: mailing?.name || "",
+      Newsletter: mailing ? publicationName(mailing, list) : "",
+      Name: who.name,
+      Organization: who.organization,
+      "Sent By": r.channel === "mail" ? "Mail" : "Email",
+      Status: deliveryStatusLabel(r),
+      "Email Address": r.channel === "email" ? who.email : "",
+      ...addressCells(who.place),
+      Copies: r.channel === "mail" ? recipientCopies(r, who.place, mailing?.publicationId) : "",
+      "Sent / Mailed": r.sentAt || "",
+      Resent: r.resentAt || "",
+      Error: r.status === "pending" ? r.error || "" : "",
+    };
+  });
+  return saveTable(DELIVERY_EXPORT_COLUMNS, rows, { title: "Export delivery list", defaultName: "delivery", sheetName: "Delivery" });
+});
+
+// Ready for a label or envelope mail merge: one row per address -- a
+// household, named for everyone who lives there, or an organization's batch,
+// to whoever its Attention line names -- with how many copies go in it.
+const ADDRESS_EXPORT_COLUMNS = ["Name", "Organization", ...Object.keys(ADDRESS_COLUMNS), "Copies"];
+
+async function exportMailingAddresses(recipientIds) {
+  const list = loadList();
+  const mailingById = new Map(store.list("mailings").map((m) => [m.id, m]));
+  const rows = recipientsByIds(recipientIds)
+    .filter((r) => r.channel === "mail")
     .map((r) => {
-      const response = pickResponse(responsesByRecipient.get(r.id) || []);
-      const contact = contactById.get(r.contactId);
-      return {
-        recipientId: r.id,
-        name: contact?.name || "",
-        memberId: contact?.externalId || "",
-        mailingId: r.mailingId,
-        mailingName: mailingById.get(r.mailingId)?.name || "",
-        channel: response?.channel || "",
-        receivedAt: response?.receivedAt || null,
-        enteredAt: r.enteredAt || null,
-      };
-    })
-    .sort((a, b) => new Date(a.receivedAt) - new Date(b.receivedAt));
-});
+      const who = recipientLabel(r, list);
+      return { Name: who.name, Organization: who.organization, ...addressCells(who.place), Copies: recipientCopies(r, who.place, mailingById.get(r.mailingId)?.publicationId) };
+    });
+  return saveTable(ADDRESS_EXPORT_COLUMNS, rows, { title: "Export mailing addresses", defaultName: "mailing-addresses", sheetName: "Addresses" });
+}
 
-// One recipient's response, ready to read. Shows their latest Gravity Forms
-// submission unless `responseId` picks another one of theirs.
-ipcMain.handle("responses:get", async (event, recipientId, responseId) => {
-  const recipient = store.get("mailingRecipients", recipientId);
-  if (!recipient) throw new Error("Recipient not found.");
-  const theirs = store.list("responses").filter((r) => r.mailingRecipientId === recipientId);
-  const response = theirs.find((r) => r.id === responseId) || pickResponse(theirs);
-  const submissions = theirs
-    .filter((r) => r.data && r.gfEntryId)
-    .sort((a, b) => new Date(b.receivedAt) - new Date(a.receivedAt))
-    .map((r) => ({ responseId: r.id, receivedAt: r.receivedAt }));
-  const contact = store.get("contacts", recipient.contactId);
-  const mailing = store.get("mailings", recipient.mailingId);
-  const gf = mailing?.gravityFormId ? store.get("gravityForms", mailing.gravityFormId) : null;
+ipcMain.handle("delivery:export-addresses", async (event, recipientIds) => exportMailingAddresses(recipientIds));
 
-  const entry = response?.data && response.gfEntryId ? response.data : null;
-  const fields = entry && gf ? await loadFormFields(gf) : null;
-  return {
-    recipientId,
-    name: contact?.name || "",
-    memberId: contact?.externalId || "",
-    mailingName: mailing?.name || "",
-    formName: gf?.name || "",
-    enteredAt: recipient.enteredAt || null,
-    previousEnteredAt: recipient.previousEnteredAt || null,
-    responseId: response?.id || null,
-    submissions,
-    channel: response?.channel || "",
-    receivedAt: response?.receivedAt || null,
-    matchedBy: response?.matchedBy || "",
-    memberIdEntered: response?.memberIdEntered || "",
-    notes: response?.notes || "",
-    attachments: recipientAttachments(theirs),
-    entryUrl: entry && gf ? gfEntryUrl(gf, response.gfEntryId) : null,
-    hasEntry: !!entry,
-    labelsMissing: !!entry && !fields,
-    answers: entry ? entryView.describeEntry(entry, fields, { skipFieldIds: [gf?.tokenFieldId] }) : [],
-  };
-});
-
-// Adds files to a response that's already recorded -- e.g. someone who
-// submitted the web form and then emailed a PDF as well. Doesn't change
-// whether the response counts as entered.
-ipcMain.handle("responses:add-attachments", async (event, responseId, filePaths) => {
-  const response = store.get("responses", responseId);
-  if (!response) throw new Error("Response not found.");
-  const added = storeAttachments(filePaths);
-  store.update("responses", responseId, { attachments: [...responseAttachments(response), ...added], attachmentPath: null });
-  return { added: added.length };
-});
-
-// Takes a file off a response. Like tracking:remove-recipient, the stored
-// copy is left on disk.
-ipcMain.handle("responses:remove-attachment", async (event, responseId, filePath) => {
-  const response = store.get("responses", responseId);
-  if (!response) throw new Error("Response not found.");
-  const attachments = responseAttachments(response).filter((file) => file.path !== filePath);
-  store.update("responses", responseId, { attachments, attachmentPath: null });
-  return true;
-});
-
-ipcMain.handle("clipboard:write-text", async (event, text) => clipboard.writeText(String(text ?? "")));
 
 // ---------------------------------------------------------------------------
 // Misc
@@ -1082,11 +1466,6 @@ ipcMain.handle("dialog:confirm", async (event, message, okLabel) => {
 });
 
 ipcMain.handle("shell:open-path", async (event, filePath) => shell.openPath(filePath));
-ipcMain.handle("shell:show-in-folder", async (event, filePath) => shell.showItemInFolder(filePath));
-ipcMain.handle("shell:open-external", async (event, url) => {
-  if (!/^https:\/\//i.test(url)) throw new Error("Only https:// links can be opened externally.");
-  return shell.openExternal(url);
-});
 ipcMain.handle("app:get-data-dir", async () => store.getDataDir());
 ipcMain.handle("app:get-version", async () => app.getVersion());
 

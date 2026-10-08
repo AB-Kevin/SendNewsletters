@@ -1,13 +1,10 @@
 Subject:
-Please complete your {{extra.Form Name}} form
+The Fall 2026 newsletter is here
 
 Body:
 Dear {{name}},
 
-Please take a few minutes to complete the attached form. You can either:
+The latest newsletter is attached as a PDF. We hope you enjoy it.
 
-1. Fill it out online here: {{form_link}}
-2. Fill out the attached PDF and reply to this email with it attached
-
-Thank you,
-{{extra.Organization}}
+Thank you for your support,
+Anabaptist Brotherhood

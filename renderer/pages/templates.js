@@ -1,15 +1,6 @@
 "use strict";
 
-function looksLikeHtml(str) {
-  return /<[a-z][\s\S]*>/i.test(str || "");
-}
-
-// Legacy templates (created before rich text) have a plain-text body --
-// preserve their line breaks when they're first loaded into the HTML editor
-// instead of collapsing them onto one line.
-function plainTextToHtml(str) {
-  return escapeHtml(str || "").replace(/\n/g, "<br>");
-}
+const MERGE_FIELDS = ["name", "orgName", "email", "addressLine1", "city", "state", "zip", "copies"];
 
 window.Pages.templates = {
   async render(container) {
@@ -19,32 +10,20 @@ window.Pages.templates = {
 
     container.innerHTML = `
       <h1>Templates</h1>
-      <p class="subtitle">Separate templates for emailed and mailed recipients — email bodies support rich text, paper letters stay plain text. Use <code>{{externalId}}</code>, <code>{{name}}</code>, <code>{{email}}</code>, <code>{{addressLine1}}</code>, <code>{{form_link}}</code>, or <code>{{extra.ColumnName}}</code> for any other imported column.</p>
+      <p class="subtitle">The email each mailing sends, with the newsletter attached as a PDF. Fill in each person's details with
+        ${MERGE_FIELDS.map((f) => `<code>{{${f}}}</code>`).join(" ")} — <code>{{copies}}</code> is how many copies of the mailing's newsletter go to their address. Sent to an organization, <code>{{name}}</code> is its Attention line.</p>
 
       <div class="panel">
         <h2 style="margin-top:0" id="form-title">New template</h2>
-        <div class="row">
-          <div class="field">
-            <label>Type</label>
-            <select id="tpl-type">
-              <option value="email">Email</option>
-              <option value="paper">Paper letter</option>
-            </select>
-          </div>
-          <div class="field" style="flex:1">
-            <label>Name</label>
-            <input type="text" id="tpl-name" placeholder="e.g. Annual Survey — Email" />
-          </div>
+        <div class="field">
+          <label for="tpl-name">Name</label>
+          <input type="text" id="tpl-name" placeholder="e.g. Fall 2026 Newsletter" />
         </div>
-        <div class="field" id="subject-field">
-          <label>Subject</label>
-          <input type="text" id="tpl-subject" placeholder="e.g. Please complete your {{extra.Committee}} form" />
+        <div class="field">
+          <label for="tpl-subject">Subject</label>
+          <input type="text" id="tpl-subject" placeholder="e.g. The Fall 2026 newsletter is here" />
         </div>
-        <div class="field" id="body-plain-field">
-          <label>Body</label>
-          <textarea id="tpl-body-plain" placeholder="Dear {{name}},&#10;&#10;Please fill out your form here: {{form_link}}&#10;A fillable PDF is attached as well."></textarea>
-        </div>
-        <div class="field" id="body-rich-field">
+        <div class="field">
           <label>Body</label>
           <div class="rte-toolbar">
             <button type="button" class="rte-btn" data-cmd="bold" title="Bold"><b>B</b></button>
@@ -61,54 +40,47 @@ window.Pages.templates = {
             <button type="button" class="btn secondary" id="link-cancel-btn">Cancel</button>
           </div>
           <div
-            id="tpl-body-rich"
+            id="tpl-body"
             class="rte-body"
             contenteditable="true"
-            data-placeholder="Dear {{name}}, Please fill out your form here: {{form_link}} A fillable PDF is attached as well."
+            data-placeholder="Dear {{name}}, the latest newsletter is attached. Thank you for your support!"
           ></div>
         </div>
-        <div class="field" id="pdf-field">
-          <label>Fillable PDF attachment</label>
+        <div class="field">
+          <label>PDF attachment</label>
           <div class="row">
             <button class="btn secondary" id="pick-pdf-btn" type="button">Choose PDF…</button>
             <span class="hint" id="pdf-name"></span>
+            <button class="btn secondary" id="remove-pdf-btn" type="button" style="display:none">Remove</button>
           </div>
+          <p class="hint">Attached to every email exactly as it is, under its file name. For a new issue, edit the template and choose the new PDF.</p>
         </div>
         <div class="row" style="margin-top:12px">
-          <button class="btn" id="save-tpl-btn">Save template</button>
-          <button class="btn secondary" id="cancel-edit-btn" style="display:none">Cancel edit</button>
+          <button class="btn" id="save-tpl-btn" type="button">Save template</button>
+          <button class="btn secondary" id="cancel-edit-btn" type="button" style="display:none">Cancel edit</button>
         </div>
       </div>
 
       <h2>Existing templates</h2>
       <div class="panel">
         <table>
-          <thead><tr><th>Name</th><th>Type</th><th>PDF attached</th><th></th></tr></thead>
-          <tbody id="tpl-body-rows"></tbody>
+          <thead><tr><th>Name</th><th>Subject</th><th>PDF attached</th><th></th></tr></thead>
+          <tbody id="tpl-rows"></tbody>
         </table>
         <div id="tpl-empty" class="empty" style="display:none">No templates yet.</div>
       </div>
     `;
 
-    function toggleTypeFields() {
-      const type = qs("#tpl-type", container).value;
-      qs("#subject-field", container).style.display = type === "email" ? "flex" : "none";
-      qs("#pdf-field", container).style.display = type === "email" ? "flex" : "none";
-      qs("#body-rich-field", container).style.display = type === "email" ? "block" : "none";
-      qs("#body-plain-field", container).style.display = type === "email" ? "none" : "flex";
-    }
-    qs("#tpl-type", container).addEventListener("change", toggleTypeFields);
-    toggleTypeFields();
+    const bodyEl = qs("#tpl-body", container);
 
     // Electron's BrowserWindow doesn't implement window.prompt() (only
     // alert()/confirm() are supported) -- it silently does nothing -- so the
-    // link URL needs its own inline input instead, following the same
-    // expandable-row pattern the Tracking page uses for "Mark received".
+    // link URL needs its own inline input instead.
     let savedLinkRange = null;
 
     qsa(".rte-btn", container).forEach((btn) => {
       btn.addEventListener("click", () => {
-        qs("#tpl-body-rich", container).focus();
+        bodyEl.focus();
         if (btn.dataset.cmd === "link") {
           const sel = window.getSelection();
           savedLinkRange = sel.rangeCount > 0 ? sel.getRangeAt(0).cloneRange() : null;
@@ -144,44 +116,50 @@ window.Pages.templates = {
       savedLinkRange = null;
     });
 
+    function showPdf() {
+      qs("#pdf-name", container).textContent = pickedPdf ? pickedPdf.originalName : "None";
+      qs("#remove-pdf-btn", container).style.display = pickedPdf ? "" : "none";
+    }
+
     qs("#pick-pdf-btn", container).addEventListener("click", async () => {
       const result = await window.api.pickPdfTemplate();
       if (!result) return;
       pickedPdf = result;
-      qs("#pdf-name", container).textContent = result.originalName;
+      showPdf();
+    });
+    qs("#remove-pdf-btn", container).addEventListener("click", () => {
+      pickedPdf = null;
+      showPdf();
     });
 
     function resetForm() {
       editingId = null;
       pickedPdf = null;
       qs("#form-title", container).textContent = "New template";
-      qs("#tpl-type", container).value = "email";
       qs("#tpl-name", container).value = "";
       qs("#tpl-subject", container).value = "";
-      qs("#tpl-body-plain", container).value = "";
-      qs("#tpl-body-rich", container).innerHTML = "";
-      qs("#pdf-name", container).textContent = "";
+      bodyEl.innerHTML = "";
       qs("#cancel-edit-btn", container).style.display = "none";
       qs("#link-input-row", container).style.display = "none";
       savedLinkRange = null;
-      toggleTypeFields();
+      showPdf();
     }
 
     qs("#cancel-edit-btn", container).addEventListener("click", resetForm);
 
     function renderList() {
-      const body = qs("#tpl-body-rows", container);
+      const body = qs("#tpl-rows", container);
       qs("#tpl-empty", container).style.display = templates.length ? "none" : "block";
       body.innerHTML = templates
         .map(
           (t) => `
         <tr>
           <td>${escapeHtml(t.name)}</td>
-          <td><span class="badge ${t.type === "email" ? "badge-email" : "badge-paper"}">${t.type}</span></td>
-          <td>${t.pdfPath ? "Yes" : "—"}</td>
-          <td>
-            <button class="btn secondary" data-edit="${t.id}">Edit</button>
-            <button class="btn danger" data-delete="${t.id}">Delete</button>
+          <td>${escapeHtml(t.subject || "")}</td>
+          <td>${t.pdfPath ? escapeHtml(t.pdfOriginalName || "Yes") : "—"}</td>
+          <td class="actions-cell">
+            <button class="btn secondary" data-edit="${t.id}" type="button">Edit</button>
+            <button class="btn danger" data-delete="${t.id}" type="button">Delete</button>
           </td>
         </tr>`
         )
@@ -193,27 +171,20 @@ window.Pages.templates = {
           editingId = tpl.id;
           pickedPdf = tpl.pdfPath ? { storedPath: tpl.pdfPath, originalName: tpl.pdfOriginalName || "current file" } : null;
           qs("#form-title", container).textContent = `Editing: ${tpl.name}`;
-          qs("#tpl-type", container).value = tpl.type;
           qs("#tpl-name", container).value = tpl.name;
           qs("#tpl-subject", container).value = tpl.subject || "";
-          if (tpl.type === "email") {
-            qs("#tpl-body-rich", container).innerHTML = looksLikeHtml(tpl.body) ? tpl.body || "" : plainTextToHtml(tpl.body);
-            qs("#tpl-body-plain", container).value = "";
-          } else {
-            qs("#tpl-body-plain", container).value = tpl.body || "";
-            qs("#tpl-body-rich", container).innerHTML = "";
-          }
-          qs("#pdf-name", container).textContent = pickedPdf ? pickedPdf.originalName : "";
+          bodyEl.innerHTML = tpl.body || "";
           qs("#cancel-edit-btn", container).style.display = "inline-block";
-          toggleTypeFields();
-          window.scrollTo(0, 0);
+          showPdf();
+          qs("#content").scrollTo(0, 0);
         })
       );
       qsa("[data-delete]", body).forEach((btn) =>
         btn.addEventListener("click", async () => {
-          if (!(await confirmAction("Delete this template?", "Delete"))) return;
+          if (!(await confirmAction("Delete this template? Mailings that use it won't be able to send emails.", "Delete"))) return;
           await window.api.deleteTemplate(btn.dataset.delete);
           templates = await window.api.listTemplates();
+          if (editingId === btn.dataset.delete) resetForm();
           renderList();
           toast("Template deleted.");
         })
@@ -222,19 +193,15 @@ window.Pages.templates = {
 
     qs("#save-tpl-btn", container).addEventListener("click", async () => {
       const name = qs("#tpl-name", container).value.trim();
-      const type = qs("#tpl-type", container).value;
-      const richEl = qs("#tpl-body-rich", container);
-      const body = type === "email" ? richEl.innerHTML.trim() : qs("#tpl-body-plain", container).value.trim();
-      const bodyIsEmpty = type === "email" ? richEl.textContent.trim() === "" : body === "";
-      if (!name || bodyIsEmpty) {
-        toast("Name and body are required.", true);
+      const subject = qs("#tpl-subject", container).value.trim();
+      if (!name || !subject || bodyEl.textContent.trim() === "") {
+        toast("Name, subject and body are all needed.", true);
         return;
       }
       const data = {
-        type,
         name,
-        subject: qs("#tpl-subject", container).value.trim(),
-        body,
+        subject,
+        body: bodyEl.innerHTML.trim(),
         pdfPath: pickedPdf ? pickedPdf.storedPath : null,
         pdfOriginalName: pickedPdf ? pickedPdf.originalName : null,
       };
@@ -250,6 +217,7 @@ window.Pages.templates = {
       renderList();
     });
 
+    showPdf();
     renderList();
   },
 };

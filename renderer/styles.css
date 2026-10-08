@@ -295,10 +295,6 @@ tr:hover td { background: var(--green-050); }
 .stat-card-failed { background: var(--danger-tint); }
 .stat-card-failed .num { color: var(--danger); }
 
-.entered-check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
-.entered-check input { width: 16px; height: 16px; margin: 0; cursor: pointer; accent-color: var(--green-500); }
-.entered-check .hint { margin-top: 0; white-space: nowrap; }
-
 .filter-rule { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
 
 #toast {
@@ -319,7 +315,8 @@ tr:hover td { background: var(--green-050); }
   opacity: 0;
   transform: translateY(8px);
   transition: all .2s ease-out;
-  max-width: 320px;
+  max-width: 360px;
+  overflow-wrap: anywhere;
   font-size: 13px;
 }
 .toast-item.visible { opacity: 1; transform: translateY(0); }
@@ -353,63 +350,191 @@ tr:hover td { background: var(--green-050); }
 .rte-body p { margin: 0 0 8px; }
 .rte-body ul, .rte-body ol { margin: 0 0 8px 20px; padding: 0; }
 
-.contact-row { cursor: pointer; }
-.contact-detail-row td { background: var(--surface-card-alt); }
+.delivery-row { cursor: pointer; }
+.delivery-detail-row td, .retry-form-row td, .filters-row td { background: var(--surface-card-alt); }
 .detail-table { width: auto; }
 .detail-table th { width: 1%; white-space: nowrap; padding-right: 24px; color: var(--text-muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: var(--tracking-label); }
 
-.section-divider { border: none; border-top: 1px solid var(--border-hairline); margin: 20px 0; }
 
-/* Responses page: queue on the left, the selected response on the right. */
-.responses-layout { display: flex; gap: 20px; align-items: flex-start; }
-.responses-list-panel { width: 320px; flex-shrink: 0; position: sticky; top: 0; }
-.responses-list-panel select, .responses-list-panel input { width: 100%; }
-.responses-list { max-height: calc(100vh - 380px); min-height: 120px; overflow-y: auto; margin: 0 -8px; }
-.resp-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  width: 100%;
-  text-align: left;
-  background: none;
-  border: none;
+th.num, td.num { text-align: right; }
+.actions-cell { white-space: nowrap; text-align: right; }
+.actions-cell .btn { margin: 2px 0 2px 4px; }
+.stat-card .num .of { font-size: 15px; font-weight: 500; color: var(--text-muted); }
+.check-label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.check-label input { width: 16px; height: 16px; margin: 0; accent-color: var(--green-500); cursor: pointer; }
+.field-buttons { display: flex; gap: 8px; align-self: flex-end; margin-bottom: 12px; flex-wrap: wrap; }
+.mapping-table td { vertical-align: middle; }
+.mapping-table td.hint { margin: 0; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-notes { margin: 0 0 6px; padding-left: 18px; color: var(--warn); }
+.preview-notes li { margin-bottom: 2px; }
+
+/* ---- Mailing List spreadsheet ----
+   The page fills the window and only the sheet scrolls, so its header row
+   and the Organization/Name columns can stay pinned while the rest moves. */
+#content.content-fill { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 16px; }
+.sheet-page { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.sheet-page h1 { margin-bottom: 8px; }
+.sheet-toolbar, .selection-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.sheet-toolbar #sheet-search { width: 280px; }
+.toolbar-gap { flex: 1; }
+.selection-bar {
+  background: var(--green-100);
   border-radius: var(--radius-control);
-  padding: 8px;
+  padding: 6px 10px;
+}
+.selection-bar strong { color: var(--accent-text); margin-right: 4px; }
+.bulk-copies { display: flex; align-items: center; gap: 6px; margin-left: 8px; }
+.bulk-copies label { font-size: 12px; color: var(--text-muted); }
+.bulk-copies input { width: 64px; padding: 5px 8px; }
+
+.sheet-scroll {
+  flex: 1;
+  min-height: 160px;
+  overflow: auto;
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-control);
+  background: var(--surface-card);
+  outline: none;
+}
+.sheet { table-layout: fixed; border-collapse: separate; border-spacing: 0; }
+.sheet th, .sheet td {
+  height: 30px;
+  padding: 0 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-bottom: 1px solid var(--border-hairline);
+  border-right: 1px solid var(--border-hairline);
+  background: var(--surface-card);
+}
+.sheet thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 34px;
+  background: var(--surface-card-alt);
+  border-bottom: 1px solid var(--border-rule);
+  cursor: pointer;
+  user-select: none;
+}
+.sheet thead th.sel-col { cursor: default; }
+.sheet thead th.flag { text-align: center; }
+.sheet .sort-mark { font-size: 9px; color: var(--accent-text); }
+.sheet .sticky { position: sticky; z-index: 1; }
+.sheet thead th.sticky { z-index: 3; }
+/* The last pinned column gets a heavier edge, so rows sliding under it read as such. */
+.sheet .sticky-last { border-right-color: var(--gray-400); }
+.sheet .sel-col { text-align: center; padding: 0; }
+.sheet .sel-col input, .sheet .cell-flag input { width: 15px; height: 15px; margin: 0; vertical-align: middle; accent-color: var(--green-500); cursor: pointer; }
+.sheet td.cell { cursor: cell; }
+.sheet td.cell-flag { text-align: center; cursor: default; }
+.sheet td.cell-count { text-align: right; }
+.sheet td.cell-readonly { color: var(--text-muted); }
+.sheet tbody tr:hover td { background: var(--green-050); }
+.sheet tbody tr.row-selected td { background: var(--green-100); }
+.sheet td.cell-problem { background: var(--danger-tint); box-shadow: inset 0 -2px 0 var(--danger); }
+.sheet tbody tr:hover td.cell-problem { background: var(--danger-tint); }
+.sheet td.cell-active { box-shadow: inset 0 0 0 1px var(--gray-400); }
+.sheet-scroll:focus .sheet td.cell-active { box-shadow: inset 0 0 0 2px var(--accent-text); }
+.sheet td.cell-editing { padding: 0; box-shadow: inset 0 0 0 2px var(--accent-text); }
+.sheet .cell-editor {
+  width: 100%;
+  height: 100%;
+  border: none;
+  padding: 0 7px;
   font: inherit;
   color: var(--text-body);
-  cursor: pointer;
-  transition: background var(--motion-fast);
+  background: var(--surface-card);
+  outline: none;
 }
-.resp-item:hover { background: var(--green-050); }
-.resp-item.selected { background: var(--green-100); }
-.resp-item .hint { margin-top: 0; }
-.resp-item-name { font-weight: 600; }
-.resp-entered-mark { color: var(--accent-text); font-weight: 600; font-size: 11px; }
-.responses-detail { flex: 1; min-width: 0; }
-.resp-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
-.resp-member-id { text-align: right; }
-.resp-member-id .label, .resp-files .label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: var(--tracking-label); font-weight: 600; }
-.resp-member-id-value { font-size: 22px; font-weight: 600; letter-spacing: .04em; }
-.resp-typed-note { color: var(--warn); }
-.resp-actions { margin: 16px 0 8px; }
-.resp-files { margin: 12px 0 16px; }
-.resp-file { gap: 8px; padding: 3px 0; }
-.resp-file .hint { margin-top: 0; }
-.resp-answers { width: 100%; }
-.resp-answers th {
-  width: 38%;
-  text-align: left;
-  vertical-align: top;
+.sheet td.cell-count .cell-editor { text-align: right; }
+.sheet tr.sheet-spacer td { padding: 0; border: none; background: none; height: auto; }
+.sheet-scroll .empty { position: sticky; left: 0; width: 100%; max-width: 100vw; }
+.sheet-help { margin: 8px 0 0; }
+
+/* Households: a family's shared cells (address, Mail, Newsletters) are one
+   merged cell across their rows, tinted so "shared" reads at a glance, and
+   a green bar in the left margin brackets the household's rows. */
+.sheet td.cell-shared { background: var(--green-050); vertical-align: middle; }
+.sheet tbody tr:hover td.cell-shared { background: var(--green-100); }
+.sheet tr.in-group td.sel-col { box-shadow: inset 3px 0 0 var(--accent-text); }
+.sheet tr.group-more td { border-top: 1px dashed var(--border-hairline); }
+.sheet tr.group-first td { border-top: 1px solid var(--gray-400); }
+.sheet td.cell-shared.cell-active { box-shadow: inset 0 0 0 1px var(--gray-400); }
+.sheet-scroll:focus .sheet td.cell-shared.cell-active { box-shadow: inset 0 0 0 2px var(--accent-text); }
+.sheet thead th.group-col { color: var(--accent-text); }
+
+.nav-badge {
+  display: none;
+  margin-left: 6px;
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--white);
+  color: var(--green-500);
+  font-size: 11px;
   font-weight: 600;
-  color: var(--text-muted);
-  white-space: normal;
-  /* Questions read as written on the form, not as an all-caps header. */
-  text-transform: none;
-  letter-spacing: normal;
-  font-size: 13px;
+  line-height: 18px;
+  text-align: center;
 }
-.resp-answers td { vertical-align: top; }
-.resp-answer { white-space: pre-wrap; word-break: break-word; }
-.resp-answers td:last-child { width: 1%; }
-.resp-section td { padding-top: 20px; font-weight: 600; font-size: 13.5px; color: var(--text-heading); border-bottom: 2px solid var(--border-rule); }
-button.copy-btn { padding: 3px 10px; font-size: 12px; }
+.nav-btn.active .nav-badge { background: var(--green-500); color: var(--white); }
+
+.import-sources { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.import-sources .panel { margin-bottom: 12px; }
+.import-sources .check-label { font-size: 12.5px; }
+
+/* Duplicates page */
+.dup-card { padding: 16px 20px; }
+.dup-reasons { margin: 0 0 10px; font-weight: 600; color: var(--warn); }
+.dup-table { width: auto; min-width: 60%; }
+.dup-table th, .dup-table td { vertical-align: top; }
+.dup-table tbody th { white-space: nowrap; padding-right: 24px; }
+.dup-table thead th .hint { display: block; text-transform: none; letter-spacing: 0; font-weight: 400; margin-top: 2px; }
+.dup-choice { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
+.dup-choice input { margin-top: 3px; accent-color: var(--green-500); }
+.dup-table td.dup-excluded { opacity: 0.4; }
+.dup-table td.dup-excluded .dup-choice { pointer-events: none; }
+
+/* Mailing List: tabs, newsletters panel, per-newsletter summary. */
+.tabs { display: flex; align-items: flex-end; gap: 4px; border-bottom: 1px solid var(--border-hairline); margin-bottom: 10px; }
+.tab {
+  background: none;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--radius-control) var(--radius-control) 0 0;
+  padding: 7px 16px;
+  font: inherit;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  margin-bottom: -1px;
+}
+.tab:hover { color: var(--accent-text); }
+.tab.active { color: var(--accent-text); background: var(--surface-card); border-color: var(--border-hairline); }
+.tabs .btn { margin-bottom: 6px; }
+.pubs-panel { padding: 14px 18px; margin-bottom: 10px; }
+.pub-row { margin-bottom: 6px; }
+.pub-row input { width: 300px; }
+.sheet-summary { color: var(--text-muted); margin-bottom: 10px; line-height: 1.6; }
+.sheet-summary .pub-line strong { color: var(--text-body); font-weight: 600; }
+.sheet-host { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.sheet-host .sheet-scroll { flex: 1; }
+.bulk-group { display: inline-flex; align-items: center; gap: 4px; padding: 0 8px; border-left: 1px solid var(--green-300); }
+.bulk-group select, .bulk-group input { padding: 5px 8px; }
+.bulk-group #bulk-copies { width: 74px; }
+.bulk-group #bulk-org { width: 180px; }
+
+/* A newsletter's Email/Mail/Copies under one heading. */
+.sheet thead tr.group-row th { height: 24px; top: 0; font-size: 10.5px; border-bottom: 1px solid var(--border-hairline); }
+.sheet thead tr.group-row th.group-head { text-align: center; color: var(--accent-text); background: var(--green-100); border-left: 1px solid var(--border-hairline); }
+.sheet.has-groups thead tr.label-row th { top: 24px; }
+.sheet thead th.under-group { text-align: center; }
+
+/* Covered by their organization's batch: hatched, so it reads differently
+   from a household's shared (tinted) cells. */
+.sheet td.cell-covered {
+  background-image: repeating-linear-gradient(135deg, transparent 0 5px, color-mix(in srgb, var(--accent-text) 16%, transparent) 5px 7px);
+}
+.sheet .cell-flag input:disabled { cursor: default; opacity: 0.5; }
+
+.pub-checks { display: flex; flex-direction: column; gap: 6px; padding-top: 4px; }

@@ -21,14 +21,32 @@ function escapeHtml(str) {
   }[c]));
 }
 
-// Shared with mailing-new.js (the filter builder) and mailings.js (showing a
-// past mailing's filters read-only), so the two stay in sync automatically.
+// "1 contact" / "12 contacts", with thousands separators.
+function plural(n, word, pluralWord = `${word}s`) {
+  return `${Number(n).toLocaleString()} ${n === 1 ? word : pluralWord}`;
+}
+
+// Contact fields by their on-screen names -- the filter builder
+// (mailing-new.js) and a past mailing's filters (mailings.js) both use these.
+const CONTACT_FIELD_LABELS = {
+  orgName: "Organization",
+  name: "Name",
+  email: "Email address",
+  addressLine1: "Address",
+  addressLine2: "Address 2",
+  city: "City",
+  state: "State",
+  zip: "ZIP",
+  copies: "Copies",
+  sourceBatch: "Source",
+};
+
 const FILTER_OPS = [
-  { value: "notEmpty", label: "is not empty" },
-  { value: "empty", label: "is empty" },
   { value: "equals", label: "equals" },
   { value: "contains", label: "contains" },
   { value: "in", label: "is one of (comma-separated)" },
+  { value: "notEmpty", label: "is not empty" },
+  { value: "empty", label: "is empty" },
 ];
 function filterOpLabel(op) {
   return FILTER_OPS.find((o) => o.value === op)?.label || op;
@@ -36,15 +54,6 @@ function filterOpLabel(op) {
 function filterRuleNeedsValue(op) {
   return op !== "empty" && op !== "notEmpty";
 }
-
-// Shared by tracking.js and responses.js.
-const RESPONSE_CHANNEL_LABELS = { web: "Web form", email_pdf: "Emailed PDF", paper: "Mailed back" };
-const MATCHED_BY_LABELS = {
-  token: "Personalized link",
-  memberId: "Member ID",
-  memberIdLookalike: "Member ID (look-alike characters, e.g. O for 0)",
-  manual: "Matched by hand",
-};
 
 function formatDate(iso) {
   if (!iso) return "";
@@ -63,7 +72,7 @@ function toast(message, isError = false) {
   setTimeout(() => {
     item.classList.remove("visible");
     setTimeout(() => item.remove(), 300);
-  }, 4000);
+  }, isError ? 7000 : 4000);
 }
 
 // Always use this instead of window.confirm() -- see "dialog:confirm" in
@@ -72,11 +81,21 @@ function confirmAction(message, okLabel) {
   return window.api.confirm(message, okLabel);
 }
 
+// A page can set `navAs` to keep another page's nav button lit -- the
+// import page belongs to the Mailing List. `fill` pages (the spreadsheet)
+// take the window's full height instead of scrolling as a whole. There's no
+// unmount hook otherwise; a page that needs to finish something before it's
+// replaced (saving an open edit) sets window.__beforeNavigate.
 async function navigate(pageName) {
-  qsa(".nav-btn").forEach((btn) => btn.classList.toggle("active", btn.dataset.page === pageName));
-  const content = qs("#content");
-  content.innerHTML = '<div class="loading">Loading…</div>';
+  const leaving = window.__beforeNavigate;
+  window.__beforeNavigate = null;
+  if (leaving) leaving();
   const page = window.Pages[pageName];
+  const navName = page?.navAs || pageName;
+  qsa(".nav-btn").forEach((btn) => btn.classList.toggle("active", btn.dataset.page === navName));
+  const content = qs("#content");
+  content.classList.toggle("content-fill", !!page?.fill);
+  content.innerHTML = '<div class="loading">Loading…</div>';
   if (!page) {
     content.innerHTML = `<div class="empty">Unknown page: ${escapeHtml(pageName)}</div>`;
     return;
@@ -87,15 +106,28 @@ async function navigate(pageName) {
     console.error(err);
     content.innerHTML = `<div class="empty">Something went wrong: ${escapeHtml(err.message)}</div>`;
   }
+  refreshNavBadges();
+}
+
+// How many possible duplicates (people, shared addresses, organizations)
+// are waiting, on the Duplicates button.
+async function refreshNavBadges() {
+  const counts = await window.api.reviewCounts().catch(() => null);
+  const badge = qs("#duplicates-badge");
+  if (!counts || !badge) return;
+  const waiting = counts.duplicates + counts.sharedAddresses + counts.orgDuplicates;
+  badge.textContent = waiting ? waiting.toLocaleString() : "";
+  badge.style.display = waiting ? "" : "none";
 }
 
 window.navigate = navigate;
+window.refreshNavBadges = refreshNavBadges;
 window.toast = toast;
 window.confirmAction = confirmAction;
 window.escapeHtml = escapeHtml;
+window.plural = plural;
 window.formatDate = formatDate;
+window.CONTACT_FIELD_LABELS = CONTACT_FIELD_LABELS;
 window.FILTER_OPS = FILTER_OPS;
-window.RESPONSE_CHANNEL_LABELS = RESPONSE_CHANNEL_LABELS;
-window.MATCHED_BY_LABELS = MATCHED_BY_LABELS;
 window.filterOpLabel = filterOpLabel;
 window.filterRuleNeedsValue = filterRuleNeedsValue;

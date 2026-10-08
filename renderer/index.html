@@ -10,28 +10,27 @@
   <div id="app">
     <nav id="nav">
       <div class="brand">SendNewsletters <span class="version" id="version-tag"></span><div class="brand-sub">Anabaptist Brotherhood</div></div>
-      <button class="nav-btn" data-page="import">Import List</button>
-      <button class="nav-btn" data-page="contacts">Contacts</button>
+      <button class="nav-btn" data-page="contacts">Mailing List</button>
+      <button class="nav-btn" data-page="duplicates">Duplicates <span class="nav-badge" id="duplicates-badge"></span></button>
       <button class="nav-btn" data-page="templates">Templates</button>
-      <button class="nav-btn" data-page="gravity-forms">Gravity Forms</button>
       <button class="nav-btn" data-page="mailing-new">New Mailing</button>
       <button class="nav-btn" data-page="mailings">Mailings</button>
-      <button class="nav-btn" data-page="tracking">Tracking</button>
-      <button class="nav-btn" data-page="responses">Responses</button>
+      <button class="nav-btn" data-page="delivery">Delivery</button>
       <button class="nav-btn" data-page="settings">Settings</button>
     </nav>
     <main id="content"></main>
   </div>
   <div id="toast"></div>
+  <script src="../lib/contactRules.js"></script>
   <script src="app.js"></script>
-  <script src="pages/import.js"></script>
+  <script src="grid.js"></script>
   <script src="pages/contacts.js"></script>
+  <script src="pages/import.js"></script>
+  <script src="pages/duplicates.js"></script>
   <script src="pages/templates.js"></script>
-  <script src="pages/gravity-forms.js"></script>
   <script src="pages/mailing-new.js"></script>
   <script src="pages/mailings.js"></script>
-  <script src="pages/tracking.js"></script>
-  <script src="pages/responses.js"></script>
+  <script src="pages/delivery.js"></script>
   <script src="pages/settings.js"></script>
   <script src="boot.js"></script>
 </body>

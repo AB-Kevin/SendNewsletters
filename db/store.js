@@ -17,10 +17,7 @@ let dataDir = null;
 
 function init(userDataPath) {
   dataDir = path.join(userDataPath, "sendnewsletters-data");
-  fs.mkdirSync(dataDir, { recursive: true });
-  for (const sub of ["pdf-templates", "generated-pdfs", "generated-letters", "attachments"]) {
-    fs.mkdirSync(path.join(dataDir, sub), { recursive: true });
-  }
+  fs.mkdirSync(path.join(dataDir, "pdf-templates"), { recursive: true });
 }
 
 function getDataDir() {
@@ -31,16 +28,39 @@ function collectionPath(name) {
   return path.join(dataDir, `${name}.json`);
 }
 
+// A missing file is just an empty collection. A file that's there but won't
+// parse is an error, not an empty list -- otherwise the next save would
+// write a near-empty list over the damaged one, and the mailing list (edited
+// in place all day) is exactly the file that can't be lost that way.
 function loadCollection(name, defaultValue) {
+  let text;
   try {
-    return JSON.parse(fs.readFileSync(collectionPath(name), "utf8"));
+    text = fs.readFileSync(collectionPath(name), "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") return defaultValue;
+    throw err;
+  }
+  try {
+    return JSON.parse(text);
   } catch {
-    return defaultValue;
+    throw new Error(`${name}.json in the data folder is damaged and couldn't be read. It hasn't been changed -- restore it from a backup.`);
   }
 }
 
+// Written to a temporary file and then moved into place, so a crash or power
+// loss mid-write leaves the previous version rather than half a file.
 function saveCollection(name, value) {
-  fs.writeFileSync(collectionPath(name), JSON.stringify(value, null, 2), "utf8");
+  const target = collectionPath(name);
+  const temp = `${target}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify(value, null, 2), "utf8");
+  try {
+    fs.renameSync(temp, target);
+  } catch {
+    // Windows can refuse the replace while something (a virus scanner, say)
+    // briefly has the file open; fall back to writing it directly.
+    fs.writeFileSync(target, JSON.stringify(value, null, 2), "utf8");
+    fs.rmSync(temp, { force: true });
+  }
 }
 
 function list(name) {
@@ -65,42 +85,6 @@ function insertMany(name, newRows) {
   rows.push(...withIds);
   saveCollection(name, rows);
   return withIds;
-}
-
-// Inserts rows that don't match an existing row's `keyField` value; for ones
-// that do, overwrites that existing row's fields in place (same internal id
-// and createdAt) instead of adding a duplicate. Used for re-importing a
-// contact list where the same external ID (e.g. GroupCode) should update the
-// existing contact -- so its mailing/tracking history stays linked -- rather
-// than creating a second contact. Rows with an empty/missing key always
-// insert, since there's nothing to match them against.
-function upsertMany(name, keyField, newRows) {
-  const rows = list(name);
-  const indexByKey = new Map();
-  rows.forEach((row, idx) => {
-    if (row[keyField]) indexByKey.set(row[keyField], idx);
-  });
-
-  let inserted = 0;
-  let updated = 0;
-  const now = new Date().toISOString();
-
-  for (const row of newRows) {
-    const key = row[keyField];
-    const idx = key ? indexByKey.get(key) : undefined;
-    if (idx !== undefined) {
-      rows[idx] = { ...rows[idx], ...row, id: rows[idx].id, createdAt: rows[idx].createdAt };
-      updated++;
-    } else {
-      const withId = { id: randomUUID(), createdAt: now, ...row };
-      rows.push(withId);
-      if (key) indexByKey.set(key, rows.length - 1);
-      inserted++;
-    }
-  }
-
-  saveCollection(name, rows);
-  return { inserted, updated };
 }
 
 function update(name, id, patch) {
@@ -141,6 +125,15 @@ function removeWhere(name, predicate) {
   return rows.length - next.length;
 }
 
+// For changes that rework a whole collection at once (re-pointing every
+// mailing recipient of a merged contact, say): fn gets the rows and returns
+// the new ones, saved in one write.
+function mutate(name, fn) {
+  const next = fn(list(name));
+  saveCollection(name, next);
+  return next;
+}
+
 function getSettings() {
   return loadCollection("settings", {});
 }
@@ -159,11 +152,11 @@ module.exports = {
   get,
   insert,
   insertMany,
-  upsertMany,
   update,
   updateWhere,
   remove,
   removeWhere,
+  mutate,
   getSettings,
   updateSettings,
 };
