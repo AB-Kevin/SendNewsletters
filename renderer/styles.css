@@ -166,10 +166,28 @@ code {
    --accent-text would wash out against white. */
 .nav-btn.active { background: var(--white); color: var(--green-500); font-weight: 500; }
 
+#main-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 #content {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 28px 36px;
+}
+
+/* Sharing problems everyone using the folder should see (see app.js). */
+#team-banner {
+  background: color-mix(in srgb, var(--warn) 14%, var(--surface-page));
+  border-bottom: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  color: var(--text-body);
+  padding: 10px 36px;
+  font-size: 13px;
+}
+#team-banner p { margin: 2px 0; }
+#nav .team-line {
+  margin-top: 8px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: color-mix(in srgb, var(--on-rail) 85%, transparent);
 }
 
 /* Page titles: light green type over the 3px green rule. */
@@ -430,8 +448,8 @@ th.num, td.num { text-align: right; }
 .sheet td.cell-flag { text-align: center; cursor: default; }
 .sheet td.cell-count { text-align: right; }
 .sheet td.cell-readonly { color: var(--text-muted); }
-.sheet tbody tr:hover td { background: var(--green-050); }
-.sheet tbody tr.row-selected td { background: var(--green-100); }
+.sheet tbody tr:hover td { background-color: var(--green-050); }
+.sheet tbody tr.row-selected td { background-color: var(--green-100); }
 .sheet td.cell-problem { background: var(--danger-tint); box-shadow: inset 0 -2px 0 var(--danger); }
 .sheet tbody tr:hover td.cell-problem { background: var(--danger-tint); }
 .sheet td.cell-active { box-shadow: inset 0 0 0 1px var(--gray-400); }
@@ -456,7 +474,7 @@ th.num, td.num { text-align: right; }
    merged cell across their rows, tinted so "shared" reads at a glance, and
    a green bar in the left margin brackets the household's rows. */
 .sheet td.cell-shared { background: var(--green-050); vertical-align: middle; }
-.sheet tbody tr:hover td.cell-shared { background: var(--green-100); }
+.sheet tbody tr:hover td.cell-shared { background-color: var(--green-100); }
 .sheet tr.in-group td.sel-col { box-shadow: inset 3px 0 0 var(--accent-text); }
 .sheet tr.group-more td { border-top: 1px dashed var(--border-hairline); }
 .sheet tr.group-first td { border-top: 1px solid var(--gray-400); }
@@ -537,4 +555,24 @@ th.num, td.num { text-align: right; }
 }
 .sheet .cell-flag input:disabled { cursor: default; opacity: 0.5; }
 
+/* Members listed under their organization: indented, on a quieter ground,
+   with a bar down the left joining them to it. */
+.sheet td.cell-toggle { cursor: pointer; position: relative; }
+.sheet .row-toggle { position: absolute; left: 8px; top: 50%; transform: translateY(-50%); color: var(--accent-text); font-size: 10px; }
+.sheet tr.org-open td[data-key="name"] { font-weight: 600; }
+.sheet tr.member-row td { background-color: var(--surface-card-alt); font-weight: normal; }
+.sheet tr.member-row td.sel-col { box-shadow: inset 3px 0 0 var(--accent-text); }
+.sheet tr.member-row td[data-key="name"] { padding-left: 26px; }
+.sheet tr.member-row td.cell-shared { background-color: var(--green-050); }
+.sheet tbody tr.member-row:hover td { background-color: var(--green-050); }
+.sheet tbody tr.member-row.row-selected td { background-color: var(--green-100); }
+.sheet tr.member-last td { border-bottom-color: var(--gray-400); }
+.sheet tr.member-row td.cell-problem, .sheet tbody tr.member-row:hover td.cell-problem { background-color: var(--danger-tint); }
+
 .pub-checks { display: flex; flex-direction: column; gap: 6px; padding-top: 4px; }
+
+/* Long folder paths (OneDrive's especially) wrap instead of running off the panel. */
+.panel code { overflow-wrap: anywhere; }
+
+.people-list { margin: 8px 0 0; padding-left: 18px; }
+.people-list li { margin: 2px 0; }

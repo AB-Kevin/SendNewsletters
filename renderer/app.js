@@ -90,6 +90,8 @@ async function navigate(pageName) {
   const leaving = window.__beforeNavigate;
   window.__beforeNavigate = null;
   if (leaving) leaving();
+  window.__refreshPage = null;
+  currentPage = pageName;
   const page = window.Pages[pageName];
   const navName = page?.navAs || pageName;
   qsa(".nav-btn").forEach((btn) => btn.classList.toggle("active", btn.dataset.page === navName));
@@ -109,6 +111,71 @@ async function navigate(pageName) {
   refreshNavBadges();
 }
 
+// ---- sharing the data folder ----
+
+let currentPage = null;
+
+// Pages that only show the list re-render when another computer's changes
+// arrive; one with a form (Import, New Mailing, Settings) is left alone. A
+// page can set window.__refreshPage to refresh itself more gently -- the
+// Mailing List keeps its scroll position and selection.
+const LIVE_PAGES = new Set(["contacts", "duplicates", "mailings", "delivery", "templates"]);
+let refreshWanted = false;
+
+function refreshPage() {
+  if (!LIVE_PAGES.has(currentPage)) return;
+  // Never while someone is typing, or while a send is under way.
+  const typing = document.activeElement?.matches?.("input:not([type=checkbox]), textarea, select, [contenteditable]") && qs("#content").contains(document.activeElement);
+  if (typing || window.__busy) {
+    refreshWanted = true;
+    return;
+  }
+  refreshWanted = false;
+  if (window.__refreshPage) window.__refreshPage();
+  else navigate(currentPage);
+}
+document.addEventListener("focusout", () =>
+  setTimeout(() => {
+    if (refreshWanted) refreshPage();
+  }, 50)
+);
+
+function onDataChanged({ messages }) {
+  for (const message of messages || []) toast(message);
+  refreshPage();
+  refreshNavBadges();
+}
+
+// Problems with sharing the folder that everyone should see, as a banner,
+// and this computer's part in it, under the app's name.
+function renderTeamStatus(status) {
+  window.__teamStatus = status;
+  if (!status) return;
+  const lines = [];
+  if (status.role === "waiting-host") {
+    lines.push(`This computer is set as the host, but ${status.host?.name ?? "another"}'s computer already is. Only one host works at a time, so this computer's changes go through that one until its app closes. To stop being the host, turn it off in Settings.`);
+  } else if (status.role === "host" && status.otherHosts.length) {
+    lines.push(`${status.otherHosts.join(", ")} ${status.otherHosts.length === 1 ? "is" : "are"} also set as the host. This computer is acting as host; the others wait.`);
+  } else if (status.role === "editor" && !status.host) {
+    lines.push(
+      `The host computer's app isn't open, so changes made here are kept on this computer for now${status.unsaved ? ` (${plural(status.unsaved, "change")})` : ""}. They'll be saved to the shared list when it's open again, and until then nobody else sees them.`
+    );
+  }
+  const banner = qs("#team-banner");
+  banner.hidden = !lines.length;
+  banner.innerHTML = lines.map((line) => `<p>${escapeHtml(line)}</p>`).join("");
+
+  const others = status.people.filter((p) => !p.isMe);
+  let text = "";
+  if (status.role === "host") text = others.length ? `Host · ${plural(others.length, "other computer")} editing` : "";
+  else if (status.role === "waiting-host") text = "Host on hold";
+  else if (status.host) text = status.unsaved ? `Saving ${plural(status.unsaved, "change")} through ${status.host.name}` : `Editing · ${status.host.name} is host`;
+  else text = "Editing · host not open";
+  const line = qs("#team-line");
+  line.textContent = text;
+  line.hidden = !text;
+}
+
 // How many possible duplicates (people, shared addresses, organizations)
 // are waiting, on the Duplicates button.
 async function refreshNavBadges() {
@@ -120,7 +187,20 @@ async function refreshNavBadges() {
   badge.style.display = waiting ? "" : "none";
 }
 
+// Sending email is the host computer's job (see main.js, requireHost):
+// elsewhere, buttons that send say why they're off.
+function sendBlockedReason() {
+  const status = window.__teamStatus;
+  if (!status || status.role === "host") return "";
+  return status.host
+    ? `Only the host computer sends emails — that's ${status.host.name}'s computer. A test email works from here.`
+    : "Only the host computer sends emails, and its app isn't open right now. A test email works from here.";
+}
+
 window.navigate = navigate;
+window.sendBlockedReason = sendBlockedReason;
+window.onDataChanged = onDataChanged;
+window.renderTeamStatus = renderTeamStatus;
 window.refreshNavBadges = refreshNavBadges;
 window.toast = toast;
 window.confirmAction = confirmAction;

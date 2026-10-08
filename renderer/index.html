@@ -9,7 +9,7 @@
 <body>
   <div id="app">
     <nav id="nav">
-      <div class="brand">SendNewsletters <span class="version" id="version-tag"></span><div class="brand-sub">Anabaptist Brotherhood</div></div>
+      <div class="brand">SendNewsletters <span class="version" id="version-tag"></span><div class="brand-sub">Anabaptist Brotherhood</div><div class="team-line" id="team-line" hidden></div></div>
       <button class="nav-btn" data-page="contacts">Mailing List</button>
       <button class="nav-btn" data-page="duplicates">Duplicates <span class="nav-badge" id="duplicates-badge"></span></button>
       <button class="nav-btn" data-page="templates">Templates</button>
@@ -18,7 +18,10 @@
       <button class="nav-btn" data-page="delivery">Delivery</button>
       <button class="nav-btn" data-page="settings">Settings</button>
     </nav>
-    <main id="content"></main>
+    <div id="main-col">
+      <div id="team-banner" hidden></div>
+      <main id="content"></main>
+    </div>
   </div>
   <div id="toast"></div>
   <script src="../lib/contactRules.js"></script>

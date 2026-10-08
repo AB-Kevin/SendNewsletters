@@ -52,7 +52,9 @@ window.Pages.contacts = {
     };
     if (saved.showFilter) state[tab].show = saved.showFilter;
     if (saved.searchTerm) state[tab].search = saved.searchTerm;
-    const remember = () => (window.__contactsView = { tab, people: state.people, orgs: state.orgs });
+    // Organizations whose members are listed under them on the Organizations tab.
+    const expanded = new Set(saved.expanded || []);
+    const remember = () => (window.__contactsView = { tab, people: state.people, orgs: state.orgs, expanded: [...expanded] });
 
     const undoStack = [];
     const pinned = []; // rows added this visit, kept at the top while they're filled in
@@ -74,6 +76,7 @@ window.Pages.contacts = {
           <input type="text" id="sheet-search" />
           <select id="sheet-show"></select>
           <span class="hint" id="view-count"></span>
+          <button class="btn secondary" id="members-btn" type="button" style="display:none"></button>
           <span class="toolbar-gap"></span>
           <span class="hint" id="save-status"></span>
           <button class="btn" id="add-row-btn" type="button"></button>
@@ -90,6 +93,14 @@ window.Pages.contacts = {
     const orgOf = (contact) => orgs.get(contact?.orgId) || null;
     const membersOfHousehold = (householdId) => contacts.filter((c) => c.householdId === householdId);
     const pubName = (id) => publications.find((p) => p.id === id)?.name || "";
+
+    // On the Organizations tab, a member listed under their organization is
+    // a row of its own, with an id that can't be mistaken for the
+    // organization's.
+    const MEMBER = "member:";
+    const memberRowId = (contactId) => MEMBER + contactId;
+    const memberOf = (rowId) => (tab === "orgs" && String(rowId).startsWith(MEMBER) ? byId.get(rowId.slice(MEMBER.length)) || null : null);
+    const membersOfOrg = (orgId) => contacts.filter((c) => c.orgId === orgId);
 
     // ---- who gets what ----
 
@@ -171,8 +182,24 @@ window.Pages.contacts = {
         if (field === "copies") return { value: R.sub(o, pubId).copies ?? "", problem: problems[col.key] };
         return { value: !!R.sub(o, pubId)[field] };
       }
-      if (col.key === "members") return { value: contacts.filter((c) => c.orgId === id).length };
+      if (col.key === "members") {
+        const count = membersOfOrg(id).length;
+        return { value: count, toggle: count ? (expanded.has(id) ? "open" : "closed") : undefined };
+      }
       return { value: o[col.key] || "", problem: problems[col.key] };
+    }
+
+    // A member's row under their organization holds what the People tab
+    // shows for them: their own Email for each newsletter, and their
+    // household's Mail, Copies and address (tinted when others live there).
+    const HOUSEHOLD_KEYS = /^(mail|copies):|^(addressLine1|addressLine2|city|state|zip)$/;
+    function memberCell(c, col) {
+      if (col.key === "attn") return { value: "", readOnly: true, readOnlyMessage: "Attention is who the organization's batches are addressed to — members don't have one." };
+      if (col.key === "members") return { value: "", readOnly: true, readOnlyMessage: "This row is one of the organization's members." };
+      const info = personCell(c.id, col);
+      const h = householdOf(c);
+      if (h && HOUSEHOLD_KEYS.test(col.key) && membersOfHousehold(h.id).length > 1) info.shared = true;
+      return info;
     }
 
     // ---- which rows are shown, in what order ----
@@ -253,11 +280,28 @@ window.Pages.contacts = {
       const sortCol = sort.key ? columnsFor().find((c) => c.key === sort.key) : null;
       const pinnedSet = new Set(pinned);
       const rows = [];
+      const searchParts = (c) => {
+        const h = householdOf(c) || {};
+        return [c.name, c.email, orgOf(c)?.name, c.sourceBatch, ...R.ADDRESS_FIELDS.map((f) => h[f])];
+      };
       if (tab === "orgs") {
-        let list = [...orgs.values()].filter((o) => orgMatchesShow(o) && matchesWords([o.name, o.attn, o.email, ...R.ADDRESS_FIELDS.map((f) => o[f]), o.sourceBatch], words));
+        // An organization is shown if it matches, or if one of its members
+        // matches the search -- listed under it, so searching a name finds
+        // their church. An expanded organization lists all its members.
+        const membersBy = new Map();
+        for (const c of contacts) if (orgs.has(c.orgId)) (membersBy.get(c.orgId) || membersBy.set(c.orgId, []).get(c.orgId)).push(c);
+        const personHit = (c) => words.length > 0 && matchesWords(searchParts(c), words);
+        const orgParts = (o) => [o.name, o.attn, o.email, ...R.ADDRESS_FIELDS.map((f) => o[f]), o.sourceBatch];
+        let list = [...orgs.values()].filter((o) => orgMatchesShow(o) && (matchesWords(orgParts(o), words) || (membersBy.get(o.id) || []).some(personHit)));
         if (sortCol) list.sort((a, b) => compare(sortCol, sort.dir, orgCell(a.id, sortCol).value, orgCell(b.id, sortCol).value));
         list = [...list.filter((o) => pinnedSet.has(o.id)), ...list.filter((o) => !pinnedSet.has(o.id))];
-        list.forEach((o, i) => rows.push({ id: o.id, groupStart: i, groupSize: 1, indexInGroup: 0 }));
+        const single = (id, className) => rows.push({ id, groupStart: rows.length, groupSize: 1, indexInGroup: 0, className });
+        for (const o of list) {
+          const members = membersBy.get(o.id) || [];
+          const listed = (expanded.has(o.id) ? members : members.filter(personHit)).sort((a, b) => collator.compare(a.name || "", b.name || ""));
+          single(o.id, listed.length ? "org-open" : "");
+          listed.forEach((c, i) => single(memberRowId(c.id), i === listed.length - 1 ? "member-row member-last" : "member-row"));
+        }
         return rows;
       }
       // A household is shown whole if anyone in it matches, so who else
@@ -273,10 +317,6 @@ window.Pages.contacts = {
           if (h) groupOf.set(h.id, group);
         }
       }
-      const searchParts = (c) => {
-        const h = householdOf(c) || {};
-        return [c.name, c.email, orgOf(c)?.name, c.sourceBatch, ...R.ADDRESS_FIELDS.map((f) => h[f])];
-      };
       let shown = groups.filter((g) => g.some((c) => personMatchesShow(c, g.length) && matchesWords(searchParts(c), words)));
       if (sortCol) {
         const value = (c) => personCell(c.id, sortCol).value;
@@ -333,7 +373,23 @@ window.Pages.contacts = {
       if (reviewCount) general.push(`<a href="#" data-duplicates>${plural(reviewCount, "possible duplicate")} to look at</a>`);
       el.innerHTML = `<div>${general.filter(Boolean).join(" · ") || "No one on the list yet."}</div>${pubLines.map((l) => `<div class="pub-line">${l}</div>`).join("")}`;
       const filtered = state[tab].search || state[tab].show !== "all";
-      qs("#view-count", container).textContent = filtered && sheet ? `${sheet.view.length.toLocaleString()} shown` : "";
+      qs("#view-count", container).textContent = filtered && sheet ? `${sheet.view.filter((row) => !memberOf(row.id)).length.toLocaleString()} shown` : "";
+      renderMembersButton();
+    }
+
+    // Lists every organization's members under it, or none.
+    const orgsWithMembers = () => [...new Set(contacts.map((c) => c.orgId))].filter((id) => orgs.has(id));
+    function renderMembersButton() {
+      const btn = qs("#members-btn", container);
+      const withMembers = orgsWithMembers();
+      btn.style.display = tab === "orgs" && withMembers.length ? "" : "none";
+      btn.textContent = withMembers.every((id) => expanded.has(id)) ? "Hide members" : "Show all members";
+    }
+
+    function expansionChanged() {
+      remember();
+      sheet.setView(computeView());
+      renderSummary();
     }
 
     // Duplicates waiting on the Duplicates page, checked again a moment
@@ -407,7 +463,14 @@ window.Pages.contacts = {
       const ids = new Set();
       for (const step of steps) {
         if (tab === "orgs") {
-          if (step.kind === "org") ids.add(step.id);
+          // Members are listed under their organization; a batch changes
+          // which of them are covered, and a household's Mail shows on the
+          // row of everyone who lives there.
+          if (step.kind === "org") {
+            ids.add(step.id);
+            membersOfOrg(step.id).forEach((c) => ids.add(memberRowId(c.id)));
+          } else if (step.kind === "contact") ids.add(memberRowId(step.id));
+          else if (step.kind === "household") membersOfHousehold(step.id).forEach((c) => ids.add(memberRowId(c.id)));
         } else if (step.kind === "contact") ids.add(step.id);
         else if (step.kind === "household") membersOfHousehold(step.id).forEach((c) => ids.add(c.id));
       }
@@ -499,6 +562,8 @@ window.Pages.contacts = {
       }
       const live = steps.filter((s) => recordOf(s.kind, s.id));
       for (const step of live) for (const [path, value] of Object.entries(step.before)) writePath(recordOf(step.kind, step.id), path, value);
+      // Undoing Remove from organization lists them under it again.
+      if (tab === "orgs" && live.some((s) => "orgName" in s.before)) sheet.setView(computeView());
       redraw(live);
       renderSummary();
       if (live.length) save(live.map((s) => toPatch(s, "before")));
@@ -527,17 +592,18 @@ window.Pages.contacts = {
       const changes = [];
       for (const { rowId, col, value } of edits) {
         const [field, pubId] = col.key.split(":");
-        if (tab === "orgs") {
+        const member = memberOf(rowId);
+        if (tab === "orgs" && !member) {
           const o = orgs.get(rowId);
           if (!o) continue;
           if (field === "mail" && pubId) changes.push(...mailChanges("org", o, pubId, value));
           else changes.push({ kind: "org", id: rowId, path: pubId ? `subs.${pubId}.${field}` : col.key, value });
           continue;
         }
-        const c = byId.get(rowId);
+        const c = member || byId.get(rowId);
         if (!c) continue;
-        if (["name", "email", "orgName"].includes(col.key)) changes.push({ kind: "contact", id: rowId, path: col.key, value });
-        else if (field === "email" && pubId) changes.push({ kind: "contact", id: rowId, path: `subs.${pubId}.email`, value });
+        if (["name", "email", "orgName"].includes(col.key)) changes.push({ kind: "contact", id: c.id, path: col.key, value });
+        else if (field === "email" && pubId) changes.push({ kind: "contact", id: c.id, path: `subs.${pubId}.email`, value });
         else {
           // Clearing a household cell for someone with no address is nothing to do.
           if (!householdOf(c) && !value) continue;
@@ -559,7 +625,17 @@ window.Pages.contacts = {
 
     const sheet = createSheet(qs("#sheet-host", container), {
       columns: columnsFor(),
-      cell: (id, col) => (tab === "orgs" ? orgCell(id, col) : personCell(id, col)),
+      cell: (id, col) => {
+        if (tab !== "orgs") return personCell(id, col);
+        const member = memberOf(id);
+        return member ? memberCell(member, col) : orgCell(id, col);
+      },
+      onToggle: (id) => {
+        if (memberOf(id) || !orgs.has(id)) return;
+        if (expanded.has(id)) expanded.delete(id);
+        else expanded.add(id);
+        expansionChanged();
+      },
       choices: () => [...orgs.values()].map((o) => o.name).filter(Boolean).sort((a, b) => collator.compare(a, b)),
       onChange: onEdits,
       onUndo: undo,
@@ -590,8 +666,13 @@ window.Pages.contacts = {
         const chosen = [...sheet.selected].map((id) => byId.get(id)).filter(Boolean);
         const sharing = (id) => contacts.filter((c) => c.householdId === id).length > 1;
         const keepPub = qs("#bulk-pub", bar)?.value;
+        const chosenMembers = tab === "orgs" ? [...sheet.selected].filter((id) => memberOf(id)).length : 0;
+        const what =
+          tab === "orgs"
+            ? [count - chosenMembers ? plural(count - chosenMembers, "organization") : "", chosenMembers ? plural(chosenMembers, "member") : ""].filter(Boolean).join(" and ")
+            : plural(count, "row");
         bar.innerHTML = `
-          <strong>${plural(count, tab === "orgs" ? "organization" : "row")} selected</strong>
+          <strong>${what} selected</strong>
           <span class="bulk-group">
             <select id="bulk-pub" title="Which newsletter the next buttons change">${publications.map((p) => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("")}</select>
             <button class="btn secondary" data-bulk="email" data-on="1" type="button">Email on</button>
@@ -610,6 +691,8 @@ window.Pages.contacts = {
                 </span>
                 ${chosen.length > 1 && chosen.some((c) => householdOf(c)) ? `<button class="btn secondary" id="combine-btn" type="button" title="Put these people at one address, getting one bundle">Make one household</button>` : ""}
                 ${chosen.some((c) => householdOf(c) && sharing(c.householdId)) ? `<button class="btn secondary" id="separate-btn" type="button" title="Give each of these people an address of their own">Separate</button>` : ""}`
+              : chosenMembers
+              ? `<button class="btn secondary" id="unlink-btn" type="button" title="They stay on the list, with no organization">Remove from organization</button>`
               : ""
           }
           <span class="toolbar-gap"></span>
@@ -624,23 +707,25 @@ window.Pages.contacts = {
 
     function wireSelectionBar(bar) {
       const pubId = () => qs("#bulk-pub", bar).value;
-      const chosenPeople = () => [...sheet.selected].map((id) => byId.get(id)).filter(Boolean);
-      const chosenOrgs = () => [...sheet.selected].map((id) => orgs.get(id)).filter(Boolean);
+      // On the Organizations tab, ticked rows can be organizations, members
+      // listed under them, or both.
+      const chosenPeople = () => [...sheet.selected].map((id) => (tab === "orgs" ? memberOf(id) : byId.get(id))).filter(Boolean);
+      const chosenOrgs = () => (tab === "orgs" ? [...sheet.selected].map((id) => orgs.get(id)).filter(Boolean) : []);
       const theirHouseholds = () => [...new Set(chosenPeople().map((c) => householdOf(c)).filter(Boolean))];
 
       qsa("[data-bulk]", bar).forEach((btn) =>
         btn.addEventListener("click", () => {
           const on = btn.dataset.on === "1";
           const field = btn.dataset.bulk;
-          if (tab === "orgs") {
-            applyChanges(chosenOrgs().flatMap((o) => (field === "mail" ? mailChanges("org", o, pubId(), on) : [{ kind: "org", id: o.id, path: `subs.${pubId()}.email`, value: on }])));
-          } else if (field === "email") {
-            applyChanges(chosenPeople().map((c) => ({ kind: "contact", id: c.id, path: `subs.${pubId()}.email`, value: on })));
+          const changes = chosenOrgs().flatMap((o) => (field === "mail" ? mailChanges("org", o, pubId(), on) : [{ kind: "org", id: o.id, path: `subs.${pubId()}.email`, value: on }]));
+          if (field === "email") {
+            changes.push(...chosenPeople().map((c) => ({ kind: "contact", id: c.id, path: `subs.${pubId()}.email`, value: on })));
           } else {
-            applyChanges(theirHouseholds().flatMap((h) => mailChanges("household", h, pubId(), on)));
+            changes.push(...theirHouseholds().flatMap((h) => mailChanges("household", h, pubId(), on)));
             const without = chosenPeople().filter((c) => !householdOf(c)).length;
             if (without) toast(`${plural(without, "selected person has", "selected people have")} no address, so Mail wasn't changed for them.`, true);
           }
+          applyChanges(changes);
         })
       );
       qs("#bulk-copies-btn", bar).addEventListener("click", () => {
@@ -650,12 +735,18 @@ window.Pages.contacts = {
           return;
         }
         const copies = Math.min(Number(text), R.MAX_COPIES);
-        const targets = tab === "orgs" ? chosenOrgs().map((o) => ["org", o.id]) : theirHouseholds().map((h) => ["household", h.id]);
+        const targets = [...chosenOrgs().map((o) => ["org", o.id]), ...theirHouseholds().map((h) => ["household", h.id])];
         applyChanges(targets.map(([kind, id]) => ({ kind, id, path: `subs.${pubId()}.copies`, value: copies })));
       });
       qs("#bulk-org-btn", bar)?.addEventListener("click", () => {
         const name = qs("#bulk-org", bar).value.replace(/\s+/g, " ").trim();
         applyChanges(chosenPeople().map((c) => ({ kind: "contact", id: c.id, path: "orgName", value: name })));
+      });
+      qs("#unlink-btn", bar)?.addEventListener("click", () => {
+        applyChanges(chosenPeople().map((c) => ({ kind: "contact", id: c.id, path: "orgName", value: "" })));
+        sheet.setView(computeView());
+        renderSummary();
+        renderSelectionBar();
       });
       qs("#combine-btn", bar)?.addEventListener("click", async () => {
         const chosen = chosenPeople();
@@ -682,21 +773,24 @@ window.Pages.contacts = {
       });
       qs("#clear-selection-btn", bar).addEventListener("click", () => sheet.clearSelection());
       qs("#delete-selected-btn", bar).addEventListener("click", async () => {
-        const ids = [...sheet.selected];
+        const orgIds = chosenOrgs().map((o) => o.id);
+        const personIds = chosenPeople().map((c) => c.id);
+        const orgText = orgIds.length ? plural(orgIds.length, "organization") : "";
+        const personText = personIds.length ? plural(personIds.length, "person", "people") : "";
         const message =
-          tab === "orgs"
-            ? `Delete ${plural(ids.length, "organization")}? This can't be undone.\n\nTheir members stay on the list, no longer part of an organization. Batches already mailed keep a record of it.`
-            : `Delete ${plural(ids.length, "person", "people")} from the mailing list? This can't be undone.\n\n` +
-              "They'll be taken off any mailing that hasn't gone out to them yet; mailings already sent keep a record of it. Anyone else at the same address stays.";
+          `Delete ${[orgText, personText].filter(Boolean).join(" and ")}${personIds.length ? " from the mailing list" : ""}? This can't be undone.` +
+          (orgIds.length ? "\n\nAn organization's members stay on the list, no longer part of an organization. Batches already mailed keep a record of it." : "") +
+          (personIds.length ? "\n\nPeople are taken off any mailing that hasn't gone out to them yet; mailings already sent keep a record of it. Anyone else at the same address stays." : "");
         if (!(await confirmAction(message, "Delete"))) return;
         try {
-          if (tab === "orgs") await window.api.deleteOrgs(ids);
-          else await window.api.deleteContacts(ids);
+          if (personIds.length) await window.api.deleteContacts(personIds);
+          if (orgIds.length) await window.api.deleteOrgs(orgIds);
         } catch (err) {
           toast(`Delete failed: ${err.message}`, true);
+          await reloadAll();
           return;
         }
-        toast(`Deleted ${plural(ids.length, tab === "orgs" ? "organization" : "person", tab === "orgs" ? "organizations" : "people")}.`);
+        toast(`Deleted ${[orgText, personText].filter(Boolean).join(" and ")}.`);
         await reloadAll();
       });
     }
@@ -801,7 +895,8 @@ window.Pages.contacts = {
       qs("#add-row-btn", container).textContent = tab === "orgs" ? "Add organization" : "Add person";
       qs("#sheet-help", container).innerHTML =
         tab === "orgs"
-          ? "An organization's Mail and Copies are a batch for its members, sent to its address (to whoever's under Attention). Members on the People tab are marked as covered, so they don't need their own copy."
+          ? "An organization's Mail and Copies are a batch for its members, sent to its address (to whoever's under Attention). Members are marked as covered (hatched), so they don't need their own copy. " +
+            "Click the arrow by a Members count to list them underneath: their rows work as on the People tab — their own Email, and their household's Mail and Copies (tinted when others live there too)."
           : "Click a cell, then type or double-click to change it; Enter and Tab move on, Esc cancels, Ctrl+Z undoes, and a block pasted from Excel fills many cells. " +
             "Shaded cells are shared by everyone at that address. Hatched cells mean their organization gets that newsletter for them.";
       undoStack.length = 0;
@@ -817,6 +912,13 @@ window.Pages.contacts = {
         setUpTab();
       })
     );
+    qs("#members-btn", container).addEventListener("click", () => {
+      sheet.commitEdit();
+      const withMembers = orgsWithMembers();
+      if (withMembers.every((id) => expanded.has(id))) expanded.clear();
+      else withMembers.forEach((id) => expanded.add(id));
+      expansionChanged();
+    });
     qs("#pubs-btn", container).addEventListener("click", () => {
       const panel = qs("#pubs-panel", container);
       const open = panel.style.display === "none";
@@ -880,7 +982,7 @@ window.Pages.contacts = {
     });
     qs("#export-btn", container).addEventListener("click", async () => {
       sheet.commitEdit();
-      const ids = sheet.view.map((row) => row.id);
+      const ids = sheet.view.map((row) => row.id).filter((id) => !memberOf(id));
       if (!ids.length) {
         toast("There's nothing shown to export.", true);
         return;
@@ -895,6 +997,23 @@ window.Pages.contacts = {
 
     // An edit still open when another page is picked would otherwise be lost.
     window.__beforeNavigate = () => sheet.commitEdit();
+    // Another computer's changes: the same tab, filter, scroll position and
+    // selection, with the new rows -- and new columns, if a newsletter was
+    // added or renamed there.
+    window.__refreshPage = async function refresh() {
+      if (sheet.isEditing()) {
+        setTimeout(() => window.__refreshPage === refresh && refresh(), 800);
+        return;
+      }
+      const pubsBefore = JSON.stringify(publications);
+      await loadList();
+      if (!document.body.contains(sheet.element)) return;
+      if (JSON.stringify(publications) !== pubsBefore) {
+        if (qs("#pubs-panel", container).style.display !== "none") renderPublicationsPanel();
+        setUpTab();
+      } else renderAll();
+      refreshReviewCount();
+    };
 
     setUpTab();
     refreshReviewCount();

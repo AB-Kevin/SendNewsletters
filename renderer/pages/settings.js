@@ -4,7 +4,8 @@ window.Pages.settings = {
   async render(container) {
     const settings = await window.api.getSettings();
     const gf = await window.api.getGfSettings();
-    const dataDir = await window.api.getDataDir();
+    const location = await window.api.getDataLocation();
+    const team = await window.api.getTeamStatus();
     const version = await window.api.getVersion();
 
     container.innerHTML = `
@@ -100,11 +101,37 @@ window.Pages.settings = {
 
       <div class="panel">
         <h2 style="margin-top:0">Data location</h2>
-        <p class="hint">The mailing list, templates and their PDFs, and the record of every mailing are stored here:</p>
+        <p class="hint" style="margin-top:0">The mailing list, newsletters, templates and their PDFs, and the record of every mailing are kept in this folder${
+          location.isDefault ? " on this computer" : ""
+        }:</p>
         <div class="row">
-          <code>${escapeHtml(dataDir)}</code>
+          <code>${escapeHtml(location.dataDir)}</code>
           <button class="btn secondary" id="open-data-dir-btn" type="button">Open folder</button>
+          <button class="btn secondary" id="change-data-dir-btn" type="button">Change…</button>
+          ${location.isDefault ? "" : `<button class="btn secondary" id="default-data-dir-btn" type="button">Use this computer's own folder</button>`}
         </div>
+        <p class="hint">To share one list between computers, choose the same folder on each of them — on OneDrive, say. Each computer keeps its own email,
+          signup form and appearance settings.</p>
+      </div>
+
+      <div class="panel">
+        <h2 style="margin-top:0">Sharing</h2>
+        <p class="hint" style="margin-top:0">Several computers can work on the list at once from one shared folder. One of them is the host: it saves everyone's changes
+          to the shared list, and it's the one that sends mailings. Everyone else's changes go to it, and show up on the other computers within seconds of OneDrive syncing.
+          The host's app has to be open for changes to be saved; until it is, they wait safely on the computer that made them.</p>
+        <div class="row" style="align-items:flex-end">
+          <div class="field" style="flex:1;max-width:320px">
+            <label for="team-name">Your name</label>
+            <input type="text" id="team-name" value="${escapeHtml(team?.name || "")}" />
+            <p class="hint">Shown to others using the same folder.</p>
+          </div>
+          <label class="check-label" style="margin-bottom:28px"><input type="checkbox" id="team-host" ${team?.isHost ? "checked" : ""} /> This computer is the host</label>
+          <button class="btn" id="team-save-btn" type="button" style="margin-bottom:22px">Save</button>
+        </div>
+        <p id="team-summary"></p>
+        <ul class="people-list hint" id="team-people"></ul>
+        <p class="hint">If two computers are set as host, the one that has been host longer keeps the job and the other waits; when that one's app closes, the waiting one
+          takes over. Changes are put in order by each computer's clock, so keep Windows' automatic time setting on.</p>
       </div>
 
       <div class="panel">
@@ -193,7 +220,51 @@ window.Pages.settings = {
       }
     });
 
-    qs("#open-data-dir-btn", container).addEventListener("click", () => window.api.openPath(dataDir));
+    qs("#open-data-dir-btn", container).addEventListener("click", () => window.api.openPath(location.dataDir));
+    // Changing it reloads the window on the new folder, so a toast after that
+    // comes from boot.js.
+    const moveData = async (fn) => {
+      try {
+        const result = await fn();
+        if (!result.changed && result.message) toast(result.message);
+      } catch (err) {
+        toast(err.message, true);
+      }
+    };
+    qs("#change-data-dir-btn", container).addEventListener("click", () => moveData(window.api.chooseDataLocation));
+
+    const teamSummary = qs("#team-summary", container);
+    const onPage = () => document.body.contains(teamSummary);
+    function renderTeam(status) {
+      if (!status || !onPage()) return;
+      const summary = {
+        host: "This computer is the host.",
+        "waiting-host": `This computer is set as the host, but ${status.host?.name ?? "another"}'s computer already is, so this computer's changes go through that one for now.`,
+        editor: status.host ? `${status.host.name}'s computer is the host; changes made here are saved through it.` : "No host computer's app is open right now; changes made here wait on this computer until one is.",
+      }[status.role];
+      const unsaved = status.unsaved ? ` ${plural(status.unsaved, "change")} made here ${status.unsaved === 1 ? "is" : "are"} waiting to be saved.` : "";
+      teamSummary.textContent = summary + unsaved;
+      const others = status.people.filter((p) => !p.isMe);
+      qs("#team-people", container).innerHTML = others.length
+        ? others.map((p) => `<li>${escapeHtml(p.name)} — ${escapeHtml(p.computer || "")}${p.role === "host" ? " (host)" : ""}</li>`).join("")
+        : "<li>Nobody else is using this folder right now.</li>";
+    }
+    renderTeam(team);
+    const stopTeamStatus = window.api.onTeamStatus((status) => {
+      if (!onPage()) stopTeamStatus();
+      else renderTeam(status);
+    });
+    qs("#team-save-btn", container).addEventListener("click", async () => {
+      try {
+        const status = await window.api.saveTeamSettings({ name: qs("#team-name", container).value, isHost: qs("#team-host", container).checked });
+        renderTeamStatus(status);
+        renderTeam(status);
+        toast("Sharing settings saved.");
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+    qs("#default-data-dir-btn", container)?.addEventListener("click", () => moveData(window.api.useDefaultDataLocation));
 
     qs("#theme-select", container).addEventListener("change", (e) =>
       window.api.setTheme(e.target.value).catch((err) => toast(`Couldn't change the theme: ${err.message}`, true))

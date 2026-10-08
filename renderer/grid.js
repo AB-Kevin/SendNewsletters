@@ -6,18 +6,22 @@
 //
 //   const sheet = createSheet(host, {
 //     columns,           // [{ key, label, width, type, sticky, readOnly, group, header, title, readOnlyMessage }]
-//     cell(rowId, col),  // -> { value, problem, covered } -- value is text, a number, or true/false for a flag
+//     cell(rowId, col),  // -> { value, problem, covered, shared, readOnly, readOnlyMessage, toggle } -- value is text, a number, or true/false for a flag
 //     choices(col),      // suggestions while typing in a "choice" column
 //     onChange(edits),   // [{ rowId, col, value }] -- one cell, or a pasted block
 //     onUndo(), onSort(col), onSelectionChange(), emptyHtml(),
+//     onToggle(rowId, col), // a cell with `toggle` ("open" or "closed") was clicked, or Enter/Space pressed on it
 //   });
-//   sheet.setView(rows) // [{ id, groupStart, groupSize, indexInGroup }] in display order
+//   sheet.setView(rows) // [{ id, groupStart, groupSize, indexInGroup, className }] in display order
 //
 // Column types: text (the default), "flag" (a checkbox), "count" (a whole
 // number) and "choice" (text with suggestions). A `group` column is one
 // merged cell across a row group -- a household's address across the rows
 // of everyone who lives there. Columns sharing a `header` are drawn under
-// one heading -- a newsletter's Email, Mail and Copies.
+// one heading -- a newsletter's Email, Mail and Copies. A cell can be
+// read-only, or tinted as shared, on its own (`readOnly`, `shared`), when
+// rows of different kinds share the columns -- an organization and the
+// members listed under it.
 //
 // Only the rows in view are in the DOM at any time -- every row is the same
 // height, so which ones are in view falls out of the scroll position -- which
@@ -140,33 +144,39 @@
       renderBody(true);
     }
 
+    const isReadOnly = (id, col) => !!(col.readOnly || config.cell(id, col)?.readOnly);
+
     function cellHtml(row, col) {
       const info = config.cell(row.id, col) || {};
-      const shared = col.group && row.groupSize > 1;
+      const merged = col.group && row.groupSize > 1;
+      const shared = merged || info.shared;
+      const readOnly = col.readOnly || info.readOnly;
       const classes = ["cell"];
       if (col.type) classes.push(`cell-${col.type}`);
       if (col.sticky) classes.push("sticky");
       if (col.stickyLast) classes.push("sticky-last");
-      if (col.readOnly) classes.push("cell-readonly");
+      if (readOnly) classes.push("cell-readonly");
+      if (info.toggle) classes.push("cell-toggle");
       if (shared) classes.push("cell-shared");
       if (info.covered) classes.push("cell-covered");
       if (info.problem) classes.push("cell-problem");
       if (active && active.id === row.id && active.key === col.key) classes.push("cell-active");
       const attrs = [`data-key="${escapeHtml(col.key)}"`];
       if (col.sticky) attrs.push(`style="left:${col.offset}px"`);
-      if (shared) attrs.push(`rowspan="${row.groupSize}"`);
+      if (merged) attrs.push(`rowspan="${row.groupSize}"`);
       const title = info.problem || info.covered || (col.type ? "" : cellText(info.value, col));
       if (title) attrs.push(`title="${escapeHtml(title)}"`);
+      const toggle = info.toggle ? `<span class="row-toggle">${info.toggle === "open" ? "▼" : "▶"}</span>` : "";
       const content =
         col.type === "flag"
-          ? `<input type="checkbox" class="flag-box" tabindex="-1" ${info.value ? "checked" : ""} ${col.readOnly ? "disabled" : ""} />`
-          : escapeHtml(cellText(info.value, col));
+          ? `<input type="checkbox" class="flag-box" tabindex="-1" ${info.value ? "checked" : ""} ${readOnly ? "disabled" : ""} />`
+          : toggle + escapeHtml(cellText(info.value, col));
       return `<td class="${classes.join(" ")}" ${attrs.join(" ")}>${content}</td>`;
     }
 
     function rowHtml(row, index) {
       const isSelected = selected.has(row.id);
-      const classes = [isSelected ? "row-selected" : ""];
+      const classes = [isSelected ? "row-selected" : "", row.className || ""];
       if (row.groupSize > 1) classes.push("in-group", row.indexInGroup === 0 ? "group-first" : "group-more");
       return `<tr data-id="${escapeHtml(row.id)}" data-index="${index}" class="${classes.join(" ")}">
         <td class="sel-col sticky" style="left:0"><input type="checkbox" class="row-select" tabindex="-1" ${isSelected ? "checked" : ""} /></td>
@@ -282,7 +292,7 @@
     }
 
     function toggleFlag(id, col) {
-      if (col.readOnly) return;
+      if (isReadOnly(id, col)) return;
       change([{ rowId: id, col, value: !config.cell(id, col)?.value }]);
     }
 
@@ -291,8 +301,13 @@
     function startEdit(typed) {
       if (!active) return;
       const col = colByKey(active.key);
-      if (col.readOnly) {
-        toast(col.readOnlyMessage || `${col.label} can't be changed here.`);
+      const info = config.cell(active.id, col) || {};
+      if (info.toggle) {
+        if (typed === undefined) config.onToggle?.(active.id, col);
+        return;
+      }
+      if (col.readOnly || info.readOnly) {
+        toast(info.readOnlyMessage || col.readOnlyMessage || `${col.label} can't be changed here.`);
         return;
       }
       if (col.type === "flag") {
@@ -347,7 +362,7 @@
     function clearActiveCell() {
       if (!active) return;
       const col = colByKey(active.key);
-      if (col.readOnly) return;
+      if (isReadOnly(active.id, col)) return;
       change([{ rowId: active.id, col, value: col.type === "flag" ? false : col.type === "count" ? 0 : "" }]);
     }
 
@@ -365,7 +380,7 @@
         if (!row) return;
         cells.forEach((rawValue, c) => {
           const col = columns[startCol + c];
-          if (!col || col.readOnly) return;
+          if (!col || isReadOnly(row.id, col)) return;
           const value = rawValue.replace(/\s+/g, " ").trim();
           if (col.type === "flag") edits.push({ rowId: row.id, col, value: ContactRules.parseFlag(value) });
           else if (col.type === "count") {
@@ -432,6 +447,7 @@
         const col = colByKey(td.dataset.key);
         setActive(id, col.key, { scrollIntoView: false });
         if (e.target.classList.contains("flag-box")) toggleFlag(id, col);
+        else if (td.classList.contains("cell-toggle")) config.onToggle?.(id, col);
       }
       scroll.focus({ preventScroll: true });
     });
@@ -507,6 +523,9 @@
       } else if (e.key === " " && col.type === "flag") {
         e.preventDefault();
         toggleFlag(active.id, col);
+      } else if (e.key === " " && config.cell(active.id, col)?.toggle) {
+        e.preventDefault();
+        config.onToggle?.(active.id, col);
       } else if (e.key.length === 1 && (!col.type || col.type === "choice")) {
         e.preventDefault();
         startEdit(e.key);
@@ -572,6 +591,7 @@
       setActive,
       startEdit,
       commitEdit: () => commitEdit(),
+      isEditing: () => !!editor,
       focus: () => scroll.focus({ preventScroll: true }),
       scrollToTop: () => {
         scroll.scrollTop = 0;

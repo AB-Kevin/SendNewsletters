@@ -17,5 +17,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   window.api.checkForUpdates(); // not awaited -- a startup check shouldn't hold up opening the app
 
+  window.api.onTeamStatus(renderTeamStatus);
+  window.api.onDataChanged(onDataChanged);
+  renderTeamStatus(await window.api.getTeamStatus());
+
   navigate("contacts");
+  // After the data folder changes, the window reloads; say what happened.
+  const notice = await window.api.takeNotice();
+  if (notice) toast(notice);
 });

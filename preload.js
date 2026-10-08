@@ -78,7 +78,24 @@ contextBridge.exposeInMainWorld("api", {
 
   confirm: (message, okLabel) => invoke("dialog:confirm", message, okLabel),
   openPath: (filePath) => invoke("shell:open-path", filePath),
-  getDataDir: () => invoke("app:get-data-dir"),
+  getDataLocation: () => invoke("data:get-location"),
+  chooseDataLocation: () => invoke("data:choose-location"),
+  useDefaultDataLocation: () => invoke("data:use-default"),
+  takeNotice: () => invoke("app:take-notice"),
+
+  getTeamStatus: () => invoke("team:status"),
+  saveTeamSettings: (data) => invoke("team:save", data),
+  onTeamStatus: (callback) => {
+    const listener = (event, status) => callback(status);
+    ipcRenderer.on("team:status", listener);
+    return () => ipcRenderer.removeListener("team:status", listener);
+  },
+  // Another computer's changes arrived (or, on the host, were saved).
+  onDataChanged: (callback) => {
+    const listener = (event, info) => callback(info);
+    ipcRenderer.on("data:changed", listener);
+    return () => ipcRenderer.removeListener("data:changed", listener);
+  },
   getVersion: () => invoke("app:get-version"),
 
   checkForUpdates: () => invoke("update:check"),

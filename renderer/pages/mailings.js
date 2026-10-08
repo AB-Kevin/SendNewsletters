@@ -69,6 +69,7 @@ window.Pages.mailings = {
         .map((m) => {
           const s = m.stats;
           const canSend = m.status !== "sent" && s.emailTotal > 0;
+          const blocked = sendBlockedReason();
           return `
         <tr>
           <td>
@@ -78,9 +79,9 @@ window.Pages.mailings = {
           <td>${emailCellHtml(m)}</td>
           <td>${mailCellHtml(m)}</td>
           <td class="actions-cell">
-            ${canSend ? `<button class="btn" data-send="${m.id}" type="button">Send emails</button>` : ""}
+            ${canSend ? `<button class="btn" data-send="${m.id}" type="button" ${blocked ? `disabled title="${escapeHtml(blocked)}"` : ""}>Send emails</button>` : ""}
             ${m.templateId ? `<button class="btn secondary" data-test="${m.id}" type="button">Test</button>` : ""}
-            ${s.emailSent ? `<button class="btn secondary" data-resend="${m.id}" type="button">Resend…</button>` : ""}
+            ${s.emailSent ? `<button class="btn secondary" data-resend="${m.id}" type="button" ${blocked ? `disabled title="${escapeHtml(blocked)}"` : ""}>Resend…</button>` : ""}
             ${s.mailTotal ? `<button class="btn secondary" data-addresses="${m.id}" type="button">Mailing addresses…</button>` : ""}
             <button class="btn secondary" data-view="${m.id}" type="button">Delivery</button>
             <button class="btn secondary" data-filters="${m.id}" type="button">Who</button>
@@ -98,6 +99,7 @@ window.Pages.mailings = {
           if (!(await confirmAction(`Email "${mailing.name}" to ${count} now?`, "Send"))) return;
           btn.disabled = true;
           btn.textContent = "Sending…";
+          window.__busy = true;
           const stopProgress = window.api.onSendProgress((p) => {
             if (p.mailingId === mailing.id && document.body.contains(btn)) btn.textContent = `Sending ${Math.min(p.done + 1, p.total)} of ${p.total}…`;
           });
@@ -111,6 +113,7 @@ window.Pages.mailings = {
             toast(`Send failed: ${err.message}`, true);
           }
           stopProgress();
+          window.__busy = false;
           navigate("mailings");
         })
       );
@@ -124,6 +127,7 @@ window.Pages.mailings = {
           if (!(await confirmAction(message, "Resend"))) return;
           btn.disabled = true;
           btn.textContent = "Sending…";
+          window.__busy = true;
           const stopProgress = window.api.onSendProgress((p) => {
             if (p.mailingId === mailing.id && document.body.contains(btn)) btn.textContent = `Sending ${Math.min(p.done + 1, p.total)} of ${p.total}…`;
           });
@@ -139,6 +143,7 @@ window.Pages.mailings = {
             toast(`Resend failed: ${err.message}`, true);
           }
           stopProgress();
+          window.__busy = false;
           navigate("mailings");
         })
       );

@@ -229,6 +229,7 @@ window.Pages.delivery = {
     function renderTable() {
       const list = filteredRows();
       const body = qs("#delivery-rows", container);
+      const blocked = sendBlockedReason();
       const empty = qs("#delivery-empty", container);
       empty.style.display = list.length ? "none" : "block";
       empty.textContent = mailings.length ? "No one matches these filters." : 'No mailings yet — create one from "New Mailing".';
@@ -245,8 +246,8 @@ window.Pages.delivery = {
           <td>${whenHtml(r)}</td>
           <td>${deliveryBadge(r)}${isSendFailed(r) ? `<br/><span class="hint send-error" title="${escapeHtml(r.error)}">${escapeHtml(r.error)}</span>` : ""}</td>
           <td class="actions-cell">
-            ${isSendFailed(r) ? `<button class="btn" data-retry="${r.id}" type="button">Fix &amp; resend…</button>` : ""}
-            ${canResend(r) ? `<button class="btn secondary" data-resend="${r.id}" type="button">Resend</button>` : ""}
+            ${isSendFailed(r) ? `<button class="btn" data-retry="${r.id}" type="button" ${blocked ? `disabled title="${escapeHtml(blocked)}"` : ""}>Fix &amp; resend…</button>` : ""}
+            ${canResend(r) ? `<button class="btn secondary" data-resend="${r.id}" type="button" ${blocked ? `disabled title="${escapeHtml(blocked)}"` : ""}>Resend</button>` : ""}
             ${canMarkMailed(r) ? `<button class="btn secondary" data-mailed="${r.id}" type="button">Mark mailed</button>` : ""}
           </td>
         </tr>
@@ -396,6 +397,9 @@ window.Pages.delivery = {
     }
     qs("#export-btn", container).addEventListener("click", () => exportShown(window.api.exportDelivery));
     qs("#export-addresses-btn", container).addEventListener("click", () => exportShown(window.api.exportAddresses, true));
+
+    // Another computer's changes: same mailing and filters, fresh rows.
+    window.__refreshPage = () => reload();
 
     await reload();
   },

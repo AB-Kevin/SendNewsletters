@@ -36,7 +36,7 @@ npm install
 npm start
 ```
 
-All data (the mailing list, templates and their PDFs, and the record of every mailing) is stored locally under the app's data folder — see **Settings → Data location** inside the app.
+All data (the mailing list, newsletters, templates and their PDFs, and the record of every mailing) is kept in one data folder — by default inside this computer's app folder. See **Data location** below to keep it somewhere else.
 
 ## Typical workflow
 
@@ -55,6 +55,7 @@ All data (the mailing list, templates and their PDFs, and the record of every ma
 
 - Click a cell to select it, then type to replace it, or double-click (or Enter/F2) to edit what's there. Enter moves down, Tab moves right, Esc cancels. Ctrl+Z undoes edits, pastes and bulk changes.
 - On **People**, shaded, merged cells — a newsletter's Mail and Copies, and the address — belong to the household: changing one changes it for everyone who lives there. Each newsletter's Email box and the email address are each person's own. Hatched cells mean their organization gets that newsletter for them.
+- On **Organizations**, click the arrow by a **Members** count to list that organization's members under it (**Show all members** lists everyone's). Their rows work as on People — tick or untick their own Email for each newsletter, or their household's Mail and Copies — and ticking members on the left lets you change them in bulk or **Remove from organization**. Searching a person's name there finds their organization, with them listed under it.
 - Type in a person's **Organization** to link them to it — suggestions come up as you type, and a name that isn't on the list yet starts a new organization.
 - Copy a block of cells in Excel and paste it onto a selected cell to fill many cells at once.
 - Click a column heading to sort; the search box matches any column. A household is always shown together.
@@ -83,9 +84,31 @@ Email addresses and street addresses count most, since names often don't line up
 
 Separate households are suggested as one when the street and ZIP match, unless both have an Address 2 and they differ (two apartments). Organizations are flagged when they have the same street address, or one name contains the other ("Maple Grove" / "Maple Grove Mennonite").
 
+## Data location
+
+**Settings → Data location → Change…** moves the list to any folder — on OneDrive, say, to back it up or to share one list between computers:
+
+- If the folder picked already has a SendNewsletters list (another computer's, say), you're asked whether to use that list. If not, you're asked whether to copy this computer's list there or start an empty one. Picking a folder that already has other files in it puts the list in a **SendNewsletters Data** folder inside it.
+- The old folder is never changed or deleted, so it's there as a backup. **Use this computer's own folder** switches back.
+- To share, pick the same folder on each computer — see **Sharing between computers** below.
+- Each computer keeps its own email (SMTP) settings, signup-form connection and appearance, outside the data folder: the passwords are encrypted with that Windows account's key, which another computer can't read. When the signup form was last imported is part of the list, so two computers don't import the same signups twice.
+- If the folder can't be found when the app starts — OneDrive not signed in, a network drive not connected — it asks whether to try again, choose another folder, or use this computer's own, rather than starting with an empty list.
+
+## Sharing between computers
+
+When several computers use one data folder, one of them is the **host** and the rest are **editors**. Everyone can edit at the same time; only the host's app writes the list itself, so OneDrive never has two versions of the same file to choose between.
+
+- **Editors** keep their changes in their own file in the folder's `people` folder. Their screen shows them straight away, and the host's app saves them to the shared list as soon as their file syncs to it. Two people changing different cells of the same person at once both keep their change; if both change the same cell, the one made later wins.
+- **Everyone sees everyone's changes** without doing anything: an open Mailing List, Duplicates, Mailings, Delivery or Templates page refreshes in place (after you finish typing in a cell). On the host, a note says whose changes it just saved.
+- **Only the host sends email** — Send emails, Resend and Fix & resend are off on the other computers, which say why. A test email works from any computer. Anyone can create mailings, edit templates and mark copies mailed.
+- **If the host's app is closed**, a banner on each editor says so, and their changes wait on that computer — nobody else sees them yet. They're saved as soon as the host's app opens again. Leave the host's app open while others are working.
+- **Settings → Sharing** shows your name as others see it, who else is using the folder, and whether this computer is the host. The first computer to use a folder is its host; a computer joining a folder while its host is open becomes an editor. To hand the job over, tick **This computer is the host** on the new one and untick it on the old one.
+- If two computers are both set as host, the one that's been host longer does the job and the other waits (and says so) until that one's app closes. A host's app that closed without warning (a crash, a power cut) still counts as open for about five minutes.
+- The computers' clocks should be roughly right: when two changes clash, the later one wins by the time it was made.
+
 ## Project layout
 
 - `main.js` / `preload.js` — Electron main process and the IPC bridge exposed to the UI.
-- `db/store.js` — local JSON-file data store (people, households, organizations, newsletters, templates, mailings, mailing recipients).
-- `lib/` — spreadsheet import (`listImport.js`), name/address comparison (`matching.js`), the duplicate checker (`duplicates.js`), the Gravity Forms client (`gravityForms.js`), the delivery rules shared with the UI (`contactRules.js`), recipient filters, template merging, and SMTP sending.
+- `db/store.js` — JSON-file data store (people, households, organizations, newsletters, templates, mailings, mailing recipients) in the data folder, plus this computer's own settings.
+- `lib/` — spreadsheet import (`listImport.js`), name/address comparison (`matching.js`), the duplicate checker (`duplicates.js`), the Gravity Forms client (`gravityForms.js`), the delivery rules shared with the UI (`contactRules.js`), sharing a data folder between computers (`team.js`), recipient filters, template merging, and SMTP sending.
 - `renderer/` — the UI (plain HTML/CSS/JS, no build step); `grid.js` is the editable spreadsheet both Mailing List tabs use.

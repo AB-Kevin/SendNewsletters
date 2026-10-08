@@ -4,6 +4,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, nativeTheme } =
 const { autoUpdater } = require("electron-updater");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const { randomUUID } = require("crypto");
 
 const store = require("./db/store");
@@ -15,6 +16,7 @@ const { renderTemplate, htmlToPlainText } = require("./lib/merge");
 const mailer = require("./lib/mailer");
 const duplicates = require("./lib/duplicates");
 const gravityForms = require("./lib/gravityForms");
+const { Team, peopleDir, readPeople, isActive, activeHosts } = require("./lib/team");
 
 let mainWindow = null;
 
@@ -88,9 +90,30 @@ if (process.env.SENDNEWSLETTERS_DATA_DIR) {
   app.setPath("userData", process.env.SENDNEWSLETTERS_DATA_DIR);
 }
 
+// Matches the installer's appId (package.json), so Windows shows this app's
+// icon on the taskbar -- not Electron's -- and pins it as itself.
+app.setAppUserModelId("com.sendnewsletters.app");
+
+// One copy of the app per computer: in a shared folder, two would both claim
+// to be this computer.
+const isPrimaryInstance = app.requestSingleInstanceLock();
+if (!isPrimaryInstance) app.quit();
+
+app.on("second-instance", () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.focus();
+});
+
 app.whenReady().then(() => {
-  store.init(app.getPath("userData"));
-  seedPublications();
+  if (!isPrimaryInstance) return;
+  const dataDir = resolveDataDir();
+  if (!dataDir) {
+    app.quit();
+    return;
+  }
+  store.init(dataDir, app.getPath("userData"));
+  openTeam();
   nativeTheme.themeSource = savedTheme();
   createWindow();
 
@@ -102,6 +125,319 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
+
+// Tells everyone else using the folder that this computer has left.
+app.on("before-quit", () => {
+  if (team) team.close();
+});
+
+// ---------------------------------------------------------------------------
+// Data location
+// ---------------------------------------------------------------------------
+// The mailing list lives in a data folder that can be anywhere: by default
+// one inside this computer's app folder, or one picked on the Settings page
+// -- on OneDrive, say, so the office's computers all work from the same
+// list. Which folder is remembered in data-location.json in this computer's
+// app folder, next to this computer's own settings (see db/store.js).
+
+const PICKED_FOLDER_NAME = "SendNewsletters Data";
+const defaultDataDir = () => path.join(app.getPath("userData"), "sendnewsletters-data");
+const locationFile = () => path.join(app.getPath("userData"), "data-location.json");
+const samePath = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+
+function configuredDataDir() {
+  try {
+    return JSON.parse(fs.readFileSync(locationFile(), "utf8")).dataDir || null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberDataDir(dir) {
+  if (!dir || samePath(dir, defaultDataDir())) fs.rmSync(locationFile(), { force: true });
+  else fs.writeFileSync(locationFile(), JSON.stringify({ dataDir: dir }, null, 2), "utf8");
+}
+
+// Where a picked folder's list goes: the folder itself when it already holds
+// a list or is empty; otherwise a "SendNewsletters Data" folder inside it, so
+// the list's files don't land loose among other documents.
+function dataDirFor(picked) {
+  if (store.isDataFolder(picked)) return picked;
+  const inside = path.join(picked, PICKED_FOLDER_NAME);
+  if (fs.existsSync(inside)) return inside;
+  const empty = fs.readdirSync(picked).filter((name) => !name.startsWith(".") && name.toLowerCase() !== "desktop.ini").length === 0;
+  return empty ? picked : inside;
+}
+
+// The folder to open at startup. One that was picked but can't be found
+// right now -- OneDrive not signed in yet, a network drive not connected --
+// is asked about rather than quietly replaced with an empty list.
+function resolveDataDir() {
+  let dir = configuredDataDir();
+  while (dir && !fs.existsSync(dir)) {
+    const response = dialog.showMessageBoxSync({
+      type: "warning",
+      title: "SendNewsletters",
+      message: "The mailing list's folder can't be found",
+      detail: `SendNewsletters is set to keep its mailing list in:\n${dir}\n\nIf that's on OneDrive or a network drive, make sure it's connected and synced, then try again.`,
+      buttons: ["Try again", "Choose another folder…", "Use this computer's own folder", "Quit"],
+      defaultId: 0,
+      cancelId: 3,
+      noLink: true,
+    });
+    if (response === 1) {
+      const picked = dialog.showOpenDialogSync({ title: "Choose the mailing list's folder", properties: ["openDirectory", "createDirectory"] });
+      if (picked?.[0]) {
+        dir = dataDirFor(picked[0]);
+        rememberDataDir(dir);
+      }
+    } else if (response === 2) {
+      dir = null;
+      rememberDataDir(null);
+    } else if (response === 3) {
+      return null;
+    }
+  }
+  return dir || defaultDataDir();
+}
+
+function folderSummary(dir) {
+  const count = (name) => {
+    try {
+      return JSON.parse(fs.readFileSync(path.join(dir, `${name}.json`), "utf8")).length || 0;
+    } catch {
+      return 0;
+    }
+  };
+  return `${count("contacts").toLocaleString()} people, ${count("orgs").toLocaleString()} organizations and ${count("mailings").toLocaleString()} mailings`;
+}
+
+// Shown once the window has reloaded on the new folder.
+let pendingNotice = null;
+
+// `role` is "editor" to join a folder another computer hosts, "host" for a
+// folder this computer has just filled (or started empty), where nobody else
+// is yet; otherwise this computer keeps its setting.
+function switchDataDir(dir, notice, role) {
+  team.close();
+  store.setJournal(null);
+  store.init(dir, app.getPath("userData"));
+  if (role === "editor") store.updateSettings({ isHost: false, hostSince: null });
+  if (role === "host" && !store.getSettings().isHost) store.updateSettings({ isHost: true, hostSince: new Date().toISOString() });
+  rememberDataDir(dir);
+  openTeam();
+  parsedFileCache = null;
+  signupCache = null;
+  pendingNotice = notice;
+  mainWindow.reload();
+}
+
+// Starts using `target` for the list. If it already holds a list, that list
+// is used as it is (another computer's, say); if not, this computer's list
+// is copied there or a new one started. The old folder is never changed, so
+// it's there as a backup.
+async function moveDataTo(target) {
+  const current = store.getDataDir();
+  if (samePath(target, current)) return { changed: false, message: "That's the folder already in use." };
+  if (path.resolve(target).toLowerCase().startsWith(path.resolve(current).toLowerCase() + path.sep)) {
+    throw new Error("Choose a folder outside the one the list is in now.");
+  }
+  if (sendsInFlight.size) throw new Error("Wait for the mailing that's sending to finish first.");
+  const ask = async (options) => (await dialog.showMessageBox(mainWindow, { type: "question", noLink: true, ...options })).response;
+
+  if (fs.existsSync(target) && store.isDataFolder(target)) {
+    const hostThere = activeHosts(readPeople(target).filter((p) => p.id !== team.me.id))[0] || null;
+    const choice = await ask({
+      message: "That folder already has a SendNewsletters list",
+      detail:
+        `It has ${folderSummary(target)}. Use that list on this computer?` +
+        (hostThere ? `\n\n${hostThere.name}'s computer is its host, so this computer's changes will be saved through it.` : "") +
+        `\n\nThis computer's current list stays where it is, unused, in case it's needed:\n${current}`,
+      buttons: ["Use that list", "Cancel"],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (choice !== 0) return { changed: false };
+    switchDataDir(target, `Now using the list in ${target}.`, hostThere ? "editor" : null);
+    return { changed: true };
+  }
+
+  const choice = await ask({
+    message: "Move the mailing list to the new folder?",
+    detail: `This computer's list (${folderSummary(current)}) will be copied to:\n${target}\n\nThe old folder is left as it was, as a backup.`,
+    buttons: ["Copy it there and use it", "Start an empty list there", "Cancel"],
+    defaultId: 0,
+    cancelId: 2,
+  });
+  if (choice === 2) return { changed: false };
+  fs.mkdirSync(target, { recursive: true });
+  if (choice === 0) {
+    // Other computers' files stay behind: they've never used the new folder.
+    const people = peopleDir(current);
+    fs.cpSync(current, target, { recursive: true, filter: (src) => !src.endsWith(".tmp") && src !== people && !src.startsWith(people + path.sep) });
+    // The list as this computer sees it, including changes the host hasn't
+    // saved yet -- in the new folder, this computer is the one that saves.
+    for (const [name, value] of Object.entries(store.snapshot())) store.writeJson(path.join(target, `${name}.json`), value);
+  }
+  switchDataDir(target, choice === 0 ? `The list was copied to ${target} and is used from there now.` : `Started an empty list in ${target}.`, "host");
+  return { changed: true };
+}
+
+ipcMain.handle("data:get-location", async () => ({ dataDir: store.getDataDir(), isDefault: samePath(store.getDataDir(), defaultDataDir()) }));
+
+ipcMain.handle("data:choose-location", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, { title: "Choose where to keep the mailing list", properties: ["openDirectory", "createDirectory"] });
+  if (result.canceled || !result.filePaths[0]) return { changed: false };
+  return moveDataTo(dataDirFor(result.filePaths[0]));
+});
+
+ipcMain.handle("data:use-default", async () => moveDataTo(defaultDataDir()));
+
+ipcMain.handle("app:take-notice", async () => {
+  const notice = pendingNotice;
+  pendingNotice = null;
+  return notice;
+});
+
+// ---------------------------------------------------------------------------
+// Sharing the data folder (see lib/team.js)
+// ---------------------------------------------------------------------------
+// One computer is the host: it writes the shared files. Any other computer
+// using the same folder records its changes in a file of its own, which the
+// host saves to the shared files within seconds of OneDrive syncing it.
+// Until then the editing computer shows its changes on top of the shared
+// files, so to whoever's using it, nothing looks different. One computer on
+// its own is its own host, so it works just as it always has.
+
+let team = null;
+// This computer is set as host and no longer-serving host is open, so it
+// writes the shared files.
+let actingHost = false;
+
+// Who is using this computer, set up the first time the app runs. A new
+// install is the host.
+function identity() {
+  const s = store.getSettings();
+  if (s.personId) return s;
+  return store.updateSettings({ personId: randomUUID(), personName: os.userInfo().username || "Me", isHost: true, hostSince: new Date().toISOString() });
+}
+
+function openTeam() {
+  const me = identity();
+  if (!team) {
+    team = new Team({ id: me.personId, name: me.personName });
+    watchTeam();
+  } else {
+    team.identity = { id: me.personId, name: me.personName };
+  }
+  actingHost = false;
+  team.setActing(false);
+  team.open(store.getDataDir(), { isHost: !!me.isHost, hostSince: me.hostSince });
+  store.setJournal(team.journal);
+  updateRole();
+  if (actingHost) seedPublications();
+}
+
+// Works out whether this computer acts as host. The host then saves anything
+// others have sent; anywhere else, changes the host has saved are dropped.
+function updateRole() {
+  const hosts = activeHosts(team.people());
+  const acting = !!store.getSettings().isHost && hosts[0]?.id === team.me.id;
+  if (acting !== actingHost) {
+    actingHost = acting;
+    team.setActing(acting);
+  }
+  if (actingHost) saveIncoming();
+  else team.trim(store.isReflected);
+  sendTeamStatus();
+}
+
+function listNames(names) {
+  return names.length <= 2 ? names.join(" and ") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+function saveIncoming() {
+  const changes = team.incoming();
+  if (!changes.length) return;
+  store.applyIncoming(changes);
+  team.markApplied(changes);
+  const names = [...new Set(changes.filter((c) => c.personId !== team.me.id).map((c) => c.name))];
+  dataChanged(names.length ? `Saved changes from ${listNames(names)}.` : null);
+}
+
+function watchTeam() {
+  // Someone arrived, left, or sent changes: re-check who's host, and as
+  // host, save what's new.
+  team.on("people", () => updateRole());
+  // The host saved: everyone else shows the new list.
+  team.on("shared", () => {
+    if (actingHost) return;
+    team.trim(store.isReflected);
+    dataChanged(null);
+    sendTeamStatus();
+  });
+  team.on("changes", () => sendTeamStatus());
+}
+
+let dataChangedTimer = null;
+let dataChangedMessages = [];
+function dataChanged(message) {
+  if (message) dataChangedMessages.push(message);
+  clearTimeout(dataChangedTimer);
+  dataChangedTimer = setTimeout(() => {
+    const messages = dataChangedMessages;
+    dataChangedMessages = [];
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("data:changed", { messages });
+  }, 300);
+}
+
+function teamStatus() {
+  if (!team?.me) return null;
+  const now = Date.now();
+  const people = team.people();
+  const hosts = activeHosts(people, now);
+  const settings = store.getSettings();
+  return {
+    role: actingHost ? "host" : settings.isHost ? "waiting-host" : "editor",
+    name: team.me.name,
+    isHost: !!settings.isHost,
+    host: hosts[0] ? { name: hosts[0].name, computer: hosts[0].computer, isMe: hosts[0].id === team.me.id } : null,
+    otherHosts: hosts.slice(1).map((h) => h.name),
+    people: people
+      .filter((p) => p.id === team.me.id || isActive(p, now))
+      .map((p) => ({ name: p.name, computer: p.computer, isMe: p.id === team.me.id, role: hosts[0]?.id === p.id ? "host" : "editor" })),
+    unsaved: actingHost ? 0 : team.unsavedCount(),
+  };
+}
+
+function sendTeamStatus() {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("team:status", teamStatus());
+}
+
+ipcMain.handle("team:status", async () => teamStatus());
+
+ipcMain.handle("team:save", async (event, { name, isHost }) => {
+  const clean = cleanText(name);
+  if (!clean) throw new Error("Enter the name others will see.");
+  if (clean.length > 60) throw new Error("Use 60 characters or fewer for the name.");
+  const was = store.getSettings();
+  const hostSince = isHost ? (was.isHost ? was.hostSince : new Date().toISOString()) : null;
+  store.updateSettings({ personName: clean, isHost: !!isHost, hostSince });
+  if (team.me.name !== clean) team.setName(clean);
+  if (!!isHost !== !!was.isHost) team.setRole(!!isHost, hostSince);
+  updateRole();
+  return teamStatus();
+});
+
+// Sending email is the host's: two computers sending the same mailing before
+// either had seen the other's "sent" marks would email people twice.
+function requireHost(what) {
+  if (actingHost) return;
+  const host = activeHosts(team.people())[0];
+  throw new Error(
+    `Only the host computer ${what}${host ? ` — that's ${host.name}'s computer` : ", and its app isn't open right now"}. A test email works from any computer.`
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -879,9 +1215,11 @@ ipcMain.handle("templates:pick-pdf", async () => {
   });
   if (result.canceled || result.filePaths.length === 0) return null;
   const srcPath = result.filePaths[0];
-  const destPath = path.join(store.getDataDir(), "pdf-templates", `${randomUUID()}.pdf`);
-  fs.copyFileSync(srcPath, destPath);
-  return { storedPath: destPath, originalName: path.basename(srcPath) };
+  // Stored relative to the data folder, so it still works after the folder
+  // moves or from another computer sharing it.
+  const storedPath = path.join("pdf-templates", `${randomUUID()}.pdf`);
+  fs.copyFileSync(srcPath, path.join(store.getDataDir(), storedPath));
+  return { storedPath, originalName: path.basename(srcPath) };
 });
 
 // ---------------------------------------------------------------------------
@@ -1100,7 +1438,7 @@ function loadSendContext(mailing) {
   let attachment = null;
   if (emailTemplate.pdfPath) {
     try {
-      attachment = { filename: emailTemplate.pdfOriginalName || "newsletter.pdf", content: fs.readFileSync(emailTemplate.pdfPath) };
+      attachment = { filename: emailTemplate.pdfOriginalName || "newsletter.pdf", content: fs.readFileSync(store.dataPath(emailTemplate.pdfPath, "pdf-templates")) };
     } catch {
       throw new Error(`The PDF for the "${emailTemplate.name}" template is missing from the data folder -- choose it again on the Templates page.`);
     }
@@ -1171,6 +1509,7 @@ function sendProgress(mailingId, done, total) {
 const sendsInFlight = new Set();
 
 ipcMain.handle("mailings:send", async (event, mailingId) => {
+  requireHost("sends mailings");
   const mailing = store.get("mailings", mailingId);
   if (!mailing) throw new Error("Mailing not found.");
   if (sendsInFlight.has(mailingId)) throw new Error("This mailing is already sending.");
@@ -1296,6 +1635,7 @@ ipcMain.handle("delivery:remove-recipient", async (event, recipientId) => {
 // organization's own address -- or, if that address is already getting this
 // mailing by mail, just takes them off the email side.
 ipcMain.handle("delivery:retry-send", async (event, recipientId, email) => {
+  requireHost("sends emails");
   const recipient = store.get("mailingRecipients", recipientId);
   if (!recipient || recipient.channel !== "email") throw new Error("Recipient not found.");
   if (recipient.status !== "pending") throw new Error("This recipient has already been sent.");
@@ -1342,6 +1682,7 @@ ipcMain.handle("delivery:retry-send", async (event, recipientId, email) => {
 // the latest resend. A failure is only reported back, not saved -- the
 // recipient was still sent the first time.
 ipcMain.handle("delivery:resend", async (event, recipientIds) => {
+  requireHost("sends emails");
   const ids = new Set(recipientIds || []);
   const recipients = store.list("mailingRecipients").filter((r) => ids.has(r.id) && r.channel === "email" && r.status === "sent");
   const list = loadList();
@@ -1466,7 +1807,6 @@ ipcMain.handle("dialog:confirm", async (event, message, okLabel) => {
 });
 
 ipcMain.handle("shell:open-path", async (event, filePath) => shell.openPath(filePath));
-ipcMain.handle("app:get-data-dir", async () => store.getDataDir());
 ipcMain.handle("app:get-version", async () => app.getVersion());
 
 // ---------------------------------------------------------------------------
