@@ -8,7 +8,7 @@ window.Pages["gravity-forms"] = {
 
     container.innerHTML = `
       <h1>Gravity Forms</h1>
-      <p class="subtitle">Recipients fill out the form on your WordPress site. FormTracker sends each recipient a link with a hidden token,
+      <p class="subtitle">Recipients fill out the form on your WordPress site. SendNewsletters sends each recipient a link with a hidden token,
         then periodically checks the Gravity Forms API for new entries and matches them back by that token.</p>
 
       <div class="panel">

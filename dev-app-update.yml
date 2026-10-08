@@ -3,5 +3,5 @@
 # checks the same GitHub Releases feed a real packaged build would.
 provider: github
 owner: AB-Kevin
-repo: FormTracker
+repo: SendNewsletters
 releaseType: release

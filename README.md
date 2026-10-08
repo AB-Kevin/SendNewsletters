@@ -1,4 +1,4 @@
-# FormTracker 0.0.1
+# SendNewsletters 0.1.0
 
 A desktop tool to send form requests to a mailing list — by email or paper mail depending on what's on file — and track who has responded and who hasn't.
 
@@ -31,15 +31,15 @@ All data (contacts, templates, generated PDFs/letters, and tracking records) is 
 
 ## One-time Gravity Forms setup (for the online response channel)
 
-FormTracker doesn't host the web form itself — it uses a form already on your WordPress site, so the emailed link works immediately for real recipients without deploying anything. To wire it up:
+SendNewsletters doesn't host the web form itself — it uses a form already on your WordPress site, so the emailed link works immediately for real recipients without deploying anything. To wire it up:
 
-1. **Add a hidden token field.** In the Gravity Forms form editor, add a hidden field. In its settings, turn on **Allow field to be populated dynamically** and set a parameter name (FormTracker defaults to `rtoken`). Note the field's **Field ID** (shown in the field settings) — you'll need it below.
+1. **Add a hidden token field.** In the Gravity Forms form editor, add a hidden field. In its settings, turn on **Allow field to be populated dynamically** and set a parameter name (SendNewsletters defaults to `rtoken`). Note the field's **Field ID** (shown in the field settings) — you'll need it below.
 2. **Enable the REST API.** Under *Gravity Forms → Settings → REST API*, enable the API and turn on **Basic Authentication** (your site must be HTTPS). Create a new API key with at least read access, and note the **Consumer Key** and **Consumer Secret**.
 3. **Note the form ID and page URL.** The form's numeric ID is visible in the Forms list. Note the public page URL where the form is embedded.
-4. In FormTracker, go to **Gravity Forms**, fill in the site URL and consumer key/secret, click **Test connection** to confirm and pick the form, then fill in the page URL, token parameter name, and the hidden field's ID.
+4. In SendNewsletters, go to **Gravity Forms**, fill in the site URL and consumer key/secret, click **Test connection** to confirm and pick the form, then fill in the page URL, token parameter name, and the hidden field's ID.
 5. *(Optional)* If the form asks for a member ID, also fill in that field's ID as **Member ID field ID**. Submissions without a token (e.g. from a plain link to the form) are then matched against the contacts' ID column — ignoring case and spacing, and treating look-alike characters such as O/0 and I/L/1 as the same when that still points to exactly one member.
 
-FormTracker never needs an inbound connection to your computer — it only reaches out to the Gravity Forms REST API, on a 5-minute timer or when you click **Sync Gravity Forms now** on the Tracking page, to pull in new submissions and match them to recipients. Only submissions made after a mailing was created are considered. Anything that can't be matched with confidence is listed under **Online responses to match** on the Tracking page, with suggested members, to match by hand or dismiss.
+SendNewsletters never needs an inbound connection to your computer — it only reaches out to the Gravity Forms REST API, on a 5-minute timer or when you click **Sync Gravity Forms now** on the Tracking page, to pull in new submissions and match them to recipients. Only submissions made after a mailing was created are considered. Anything that can't be matched with confidence is listed under **Online responses to match** on the Tracking page, with suggested members, to match by hand or dismiss.
 
 ## Typical workflow
 

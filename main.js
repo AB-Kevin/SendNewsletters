@@ -83,11 +83,11 @@ function createWindow() {
 }
 
 // Lets a dev/test run point at a throwaway data directory instead of the
-// real one (%APPDATA%\formtracker by default) -- set FORMTRACKER_DATA_DIR
+// real one (%APPDATA%\sendnewsletters by default) -- set SENDNEWSLETTERS_DATA_DIR
 // before launching to avoid ever reading, seeding, or deleting a real
 // installation's contacts/templates/mailings while exercising the app.
-if (process.env.FORMTRACKER_DATA_DIR) {
-  app.setPath("userData", process.env.FORMTRACKER_DATA_DIR);
+if (process.env.SENDNEWSLETTERS_DATA_DIR) {
+  app.setPath("userData", process.env.SENDNEWSLETTERS_DATA_DIR);
 }
 
 app.whenReady().then(() => {
@@ -688,7 +688,7 @@ ipcMain.handle("tracking:export", async (event, recipientIds, format) => {
 
   const result = await dialog.showSaveDialog(mainWindow, {
     title: "Export tracking table",
-    defaultPath: `formtracker-export.${format}`,
+    defaultPath: `sendnewsletters-export.${format}`,
     filters:
       format === "xlsx" ? [{ name: "Excel", extensions: ["xlsx"] }] : [{ name: "CSV", extensions: ["csv"] }],
   });
@@ -727,7 +727,7 @@ ipcMain.handle("tracking:export-paper-addresses", async (event, recipientIds) =>
 
   const result = await dialog.showSaveDialog(mainWindow, {
     title: "Export paper mailing addresses",
-    defaultPath: "formtracker-paper-addresses.csv",
+    defaultPath: "sendnewsletters-paper-addresses.csv",
     filters: [{ name: "CSV", extensions: ["csv"] }],
   });
   if (result.canceled || !result.filePath) return null;

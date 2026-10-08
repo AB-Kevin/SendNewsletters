@@ -1,6 +1,6 @@
 "use strict";
 
-// Plain JSON-file collections instead of a native SQLite binding. FormTracker
+// Plain JSON-file collections instead of a native SQLite binding. SendNewsletters
 // is a single-user desktop tool operating on mailing lists of at most a few
 // thousand contacts, well within the range where "load the whole collection,
 // mutate, write it back" is simple and fast enough -- and it avoids pulling
@@ -16,7 +16,7 @@ const { randomUUID } = require("crypto");
 let dataDir = null;
 
 function init(userDataPath) {
-  dataDir = path.join(userDataPath, "formtracker-data");
+  dataDir = path.join(userDataPath, "sendnewsletters-data");
   fs.mkdirSync(dataDir, { recursive: true });
   for (const sub of ["pdf-templates", "generated-pdfs", "generated-letters", "attachments"]) {
     fs.mkdirSync(path.join(dataDir, sub), { recursive: true });

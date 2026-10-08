@@ -1,7 +1,7 @@
 {
-  "name": "formtracker",
-  "version": "1.2.0",
-  "description": "FormTracker - import a mailing list, send email/paper form requests, and track who has responded",
+  "name": "sendnewsletters",
+  "version": "0.1.0",
+  "description": "SendNewsletters - import a mailing list, send email/paper form requests, and track who has responded",
   "main": "main.js",
   "author": "",
   "license": "MIT",
@@ -15,8 +15,8 @@
     "electron-builder": "^26.15.3"
   },
   "build": {
-    "appId": "com.formtracker.app",
-    "productName": "FormTracker",
+    "appId": "com.sendnewsletters.app",
+    "productName": "SendNewsletters",
     "files": [
       "main.js",
       "preload.js",
@@ -37,7 +37,7 @@
     "publish": {
       "provider": "github",
       "owner": "AB-Kevin",
-      "repo": "FormTracker",
+      "repo": "SendNewsletters",
       "releaseType": "release"
     }
   },
