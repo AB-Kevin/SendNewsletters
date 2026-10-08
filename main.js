@@ -803,13 +803,13 @@ function planImport(source, mapping, options) {
 }
 
 ipcMain.handle("import:plan", async (event, source, mapping, options) => {
-  const { stats, matches, ambiguousNames, contactInserts, after } = planImport(source, mapping, options);
+  const { stats, matches, ambiguousNames, noAddressNames, contactInserts, after } = planImport(source, mapping, options);
   // New contacts the duplicate checker would flag once they're in --
   // usually the same person under a nickname or with a different email.
   const newIds = new Set(contactInserts.map((c) => c.id));
   const { duplicates: groups } = duplicates.findDuplicates(after.contacts, after.households, after.orgs, dismissedPairs());
   const possibleDuplicates = groups.filter((g) => g.ids.some((id) => newIds.has(id))).length;
-  return { stats, ambiguousNames, possibleDuplicates, matches: matches.filter((m) => m.changedFields.length).slice(0, 200) };
+  return { stats, ambiguousNames, noAddressNames, possibleDuplicates, matches: matches.filter((m) => m.changedFields.length).slice(0, 200) };
 });
 
 ipcMain.handle("import:commit", async (event, source, mapping, options) => {

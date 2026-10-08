@@ -115,6 +115,7 @@ window.Pages.import = {
         sourceBatch: qs("#batch-name", container).value.trim() || preview.defaultBatchName,
         defaultCopies: qs("#default-copies", container).value.trim() || "1",
         deliveryDefault: qs("#delivery-default", container).value,
+        replaceDelivery: mode() === "person" && qs("#replace-delivery", container).checked,
       };
     }
 
@@ -195,7 +196,7 @@ window.Pages.import = {
         </div>
 
         <div class="panel">
-          <h2 style="margin-top:0">For anyone new to a ticked newsletter</h2>
+          <h2 style="margin-top:0" id="delivery-heading">For anyone new to a ticked newsletter</h2>
           <div class="row" style="align-items:flex-start">
             <div class="field" style="flex:1;min-width:260px">
               <label for="delivery-default">How they get it</label>
@@ -203,6 +204,7 @@ window.Pages.import = {
                 ${preview.deliveryDefaults.map((d) => `<option value="${d.value}">${escapeHtml(d.label)}</option>`).join("")}
               </select>
               <p class="hint" id="delivery-hint"></p>
+              <label class="check-label" id="replace-delivery-label"><input type="checkbox" id="replace-delivery" /> Use this for everyone in the file, replacing how they get it now</label>
             </div>
             <div class="field">
               <label for="default-copies">Copies</label>
@@ -215,7 +217,7 @@ window.Pages.import = {
               <p class="hint">Shown in the Source column, so you can find everyone from this file later.</p>
             </div>
           </div>
-          <p class="hint" style="margin-top:0">Anyone who already gets a newsletter keeps how they get it unless the file has a column for it. A blank cell never erases what's already there.</p>
+          <p class="hint" style="margin-top:0" id="keeps-hint"></p>
         </div>
 
         <div class="panel">
@@ -249,6 +251,10 @@ window.Pages.import = {
         })
       );
       for (const id of ["#delivery-default", "#default-copies", "#batch-name"]) qs(id, area).addEventListener("input", schedulePlan);
+      qs("#replace-delivery", area).addEventListener("change", () => {
+        renderOptionHints();
+        schedulePlan();
+      });
       qs("#cancel-import-btn", area).addEventListener("click", () => navigate("contacts"));
       qs("#commit-import-btn", area).addEventListener("click", commit);
       renderOptionHints();
@@ -257,16 +263,28 @@ window.Pages.import = {
 
     function renderOptionHints() {
       const targets = mappedTargets();
-      const mail = targets.has("sendByMail");
-      const email = targets.has("sendByEmail");
+      const mail = targets.has("sendByMail") || targets.has("delivery");
+      const email = targets.has("sendByEmail") || targets.has("delivery");
       qs("#mode-hint", container).textContent =
         mode() === "org"
           ? "Each row's Organization is matched to one already on the list, or added. Its address is where batches go."
           : "A row with an organization but no person's name is taken as the organization itself.";
       qs("#delivery-default", container).disabled = mail && email;
+      const replaceBox = qs("#replace-delivery", container);
+      replaceBox.disabled = mode() === "org" || (mail && email);
+      if (replaceBox.disabled) replaceBox.checked = false;
+      qs("#replace-delivery-label", container).style.display = mode() === "org" ? "none" : "";
+      const replacing = replaceBox.checked;
+      qs("#delivery-heading", container).textContent = replacing ? "For everyone in the file" : "For anyone new to a ticked newsletter";
+      qs("#keeps-hint", container).textContent = replacing
+        ? "Everyone in the file gets the ticked newsletters this way, instead of how they get them now — except where the file has a Mail or Email column for it. " +
+          "Anyone whose organization gets the newsletter as a batch is left as they are, and so is anyone without the address it takes. A blank cell never erases an address."
+        : "Anyone who already gets a newsletter keeps how they get it unless the file has a column for it. A blank cell never erases what's already there.";
       qs("#delivery-hint", container).textContent =
         mode() === "org"
           ? "An organization gets a batch by mail if it has an address, otherwise by email."
+          : targets.has("delivery")
+          ? "The file's Mail / Email / Both column decides this, except where it's blank."
           : mail && email
           ? "The file's Mail and Email columns decide this."
           : mail
@@ -347,6 +365,23 @@ window.Pages.import = {
         ${
           stats.unreadableCopies
             ? `<p class="hint" style="color:var(--warn)">${plural(stats.unreadableCopies, "row")} had something other than a number in a copies column. Those keep their current number (or ${escapeHtml(options().defaultCopies)}, if they're new).</p>`
+            : ""
+        }
+        ${
+          stats.unreadableDelivery
+            ? `<p class="hint" style="color:var(--warn)">${plural(stats.unreadableDelivery, "row")} had something in a Mail / Email / Both column that isn't Mail, Email, Both or None. Those are treated as if the cell were blank.</p>`
+            : ""
+        }
+        ${
+          stats.replaceCovered
+            ? `<p class="hint">${plural(stats.replaceCovered, "person", "people")} ${stats.replaceCovered === 1 ? "is" : "are"} left as they are for a newsletter their organization gets as a batch.</p>`
+            : ""
+        }
+        ${
+          stats.replaceNoAddress
+            ? `<p class="hint" style="color:var(--warn)">${plural(stats.replaceNoAddress, "person", "people")} ${stats.replaceNoAddress === 1 ? "doesn't" : "don't"} have the address it takes to get it that way, so ${
+                stats.replaceNoAddress === 1 ? "is" : "are"
+              } left as they are: ${plan.noAddressNames.map(escapeHtml).join(", ")}${stats.replaceNoAddress > plan.noAddressNames.length ? ", …" : ""}.</p>`
             : ""
         }
         ${
