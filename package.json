@@ -43,7 +43,7 @@
   },
   "dependencies": {
     "electron-updater": "^6.8.9",
-    "nodemailer": "^6.9.16",
+    "nodemailer": "^10.0.15",
     "papaparse": "^5.4.1",
     "xlsx": "^0.18.5"
   }
