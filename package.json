@@ -1,6 +1,6 @@
 {
   "name": "sendnewsletters",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "SendNewsletters - keep the newsletter mailing list, email the newsletter as a PDF, and get the addresses and counts for mailed copies",
   "main": "main.js",
   "author": "",
