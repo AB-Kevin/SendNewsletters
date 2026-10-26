@@ -30,8 +30,8 @@
       "icon": "build/icon.png"
     },
     "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
+      "oneClick": true,
+      "perMachine": false,
       "artifactName": "SendNewsletters-Setup-${version}.${ext}"
     },
     "publish": {
