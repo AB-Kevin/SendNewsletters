@@ -1,10 +1,11 @@
 /* SendNewsletters — Anabaptist Brotherhood design system.
    Tokens mirrored from the anabaptist-brotherhood-design system's
-   tokens/*.css (Brand & Design Manual v1.1), with the same dark palette as
-   ApplicationManager and BillManager so the office's apps look alike. Green
-   is structural -- the rail, headings, rules, links, the primary button --
-   and everything else stays white space, charcoal and gray. Maroon isn't
-   used: the manual keeps it to a few narrow spots this app doesn't have.
+   tokens/*.css (Brand & Design Manual v1.1), with the same Light and Dark
+   palettes, header and side nav as AB Apps and the other newer apps, so the
+   office's apps look alike. Green is structural -- headings, rules, links,
+   the primary button -- and everything else stays white space, charcoal and
+   gray. Maroon isn't used: the manual keeps it to a few narrow spots this
+   app doesn't have.
 
    Dark mode: main.js sets nativeTheme.themeSource from the Appearance choice
    on the Settings page, and prefers-color-scheme follows it -- so "Match
@@ -28,24 +29,27 @@
   --white: #ffffff;
 
   /* Green as text, borders and focus rings -- lightened in dark mode so it
-     stays legible off a white page. Filled green (buttons, the rail) uses
-     --green-500 directly and stays brand green in both themes. */
+     stays legible off a white page -- and its stronger form for active
+     items. Filled green (buttons, badges) uses --fill-accent and stays brand
+     green in both themes. */
   --accent-text: var(--green-500);
+  --text-accent: var(--green-700);
+  --fill-accent: var(--green-500);
+  --fill-accent-hover: var(--green-600);
+  --fill-accent-active: var(--green-700);
   --on-accent: var(--white);
-  --on-rail: var(--white);
 
   --text-body: var(--gray-900);
   --text-muted: var(--gray-600);
   --text-heading: var(--accent-text);
   --border-hairline: var(--gray-200);
-  --border-rule: var(--accent-text);
-  --border-reversed: color-mix(in srgb, var(--on-rail) 35%, transparent);
+  --border-rule: var(--green-500);
+  --border-rule-soft: var(--green-300);
   --focus-ring: var(--accent-text);
   --surface-page: var(--white);
   --surface-card: var(--white); /* panels, inputs */
-  --surface-card-alt: var(--green-050); /* expanded rows, toolbar buttons */
+  --surface-card-alt: var(--green-050); /* the side nav, expanded rows, toolbar buttons */
   --surface-neutral: var(--gray-100); /* gray badge */
-  --surface-rail: var(--green-500);
   --surface-toast: var(--gray-900);
 
   /* The manual has no red or amber. These are muted so failures and
@@ -55,28 +59,35 @@
   --danger-solid: #9c4a3d; /* fills under white text, same in both themes */
   --warn: #8a6116;
 
-  --font-sans: "Poppins", "Intelo Alt", "Nunito Sans", "Segoe UI", system-ui, sans-serif;
+  --font-sans: "Poppins", "Intelo Alt", "Segoe UI", system-ui, sans-serif;
   --tracking-label: 0.06em;
   --radius-control: 4px;
   --radius-card: 10px; /* the mint info card -- the one rounded object in the system */
   --motion-fast: 120ms ease-out;
 }
 
+/* The brand defines only a light theme; this is the newer apps' dark one,
+   keeping its structure on a warm dark ground. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --surface-page: #1b1c1e;
-    --surface-card: #232527;
-    --surface-card-alt: #2c2e31;
-    --surface-neutral: #2c2e31;
-    --surface-toast: #3a3c3f;
-    --border-hairline: #38393c;
-    --text-body: #ececec;
-    --text-muted: #a8a9ab;
-    --accent-text: #4cc38a;
-    /* The pale-tint role (hover fills, mint badges and cards) goes
-       dark-tinted, so "green text on a mint tint" keeps working. */
-    --green-100: #24352d;
-    --green-050: #1e2b25;
+    --surface-page: #1e1c1d;
+    --surface-card: #2a2728;
+    --surface-card-alt: #1c2220;
+    --surface-neutral: #2e2b2c;
+    --surface-toast: #3a3637;
+    --border-hairline: #403c3d;
+    --border-rule: #2f9468; /* brighter than the brand green, so rules show */
+    --border-rule-soft: #314d3f;
+    --text-body: #ece9ea;
+    --text-muted: #aba8a9;
+    --accent-text: #5dbe8f;
+    --text-accent: #8fd4b0;
+    --fill-accent-hover: #007a4e; /* hover lightens rather than darkens on a dark page */
+    --fill-accent-active: #00865a;
+    /* The pale-tint role (hover fills, mint badges and cards, the side nav)
+       goes dark-tinted, so "green text on a mint tint" keeps working. */
+    --green-100: #192a24;
+    --green-050: #1c2220;
     --danger: #e3907f;
     --danger-tint: #3a2724;
     --warn: #d9b46a;
@@ -98,8 +109,8 @@ button, input, select, textarea { font-family: inherit; }
 :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 ::selection { background: color-mix(in srgb, var(--accent-text) 28%, transparent); }
 
-a { color: var(--accent-text); text-decoration: none; border-bottom: 1px solid var(--green-300); }
-a:hover { border-bottom-color: var(--accent-text); }
+a { color: var(--accent-text); text-decoration: none; border-bottom: 1px solid var(--border-rule-soft); }
+a:hover { color: var(--text-accent); border-bottom-color: var(--border-rule); }
 
 code {
   font-family: Consolas, "Cascadia Mono", monospace;
@@ -111,60 +122,83 @@ code {
 
 #app {
   display: flex;
+  flex-direction: column;
   height: 100vh;
 }
 
-/* The brand's green rail, carrying reversed white text. */
+/* The same header as AB Apps and the other newer apps: logo lockup and the
+   app's name over the 3px green rule. Windows' own title bar sits above it. */
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 12px 32px;
+  border-bottom: 3px solid var(--border-rule);
+  flex-shrink: 0;
+}
+.app-header .brand { display: flex; align-items: center; gap: 16px; }
+.app-header .logo { height: 44px; width: auto; display: block; }
+/* The lockup is a JPEG on white, so it keeps a small white plate in Dark. */
+@media (prefers-color-scheme: dark) {
+  .app-header .logo { padding: 4px 8px; background: var(--white); border-radius: var(--radius-control); }
+}
+.app-header .app-name {
+  font-size: 16px;
+  font-weight: 300;
+  color: var(--text-muted);
+  padding-left: 16px;
+  border-left: 1px solid var(--border-hairline);
+}
+.app-header .app-header-end { margin-left: auto; font-size: 13px; }
+
+#app-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/* AB Apps' pale side nav: a recessed tint with a hairline edge, green
+   items, and the active one marked with a mint fill and a green bar on its
+   left edge. */
 #nav {
   width: 210px;
   flex-shrink: 0;
-  background: var(--surface-rail);
-  color: var(--on-rail);
+  background: var(--surface-card-alt);
+  border-right: 1px solid var(--border-hairline);
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 20px 12px;
+  padding: 24px 12px 16px;
+  overflow-y: auto;
 }
-#nav :focus-visible { outline-color: var(--on-rail); }
-
-#nav .brand {
-  font-weight: 600;
-  font-size: 18px;
-  letter-spacing: -0.01em;
-  padding: 0 8px 16px;
-  border-bottom: 1px solid var(--border-reversed);
-  margin-bottom: 10px;
-}
-#nav .brand .version {
-  font-weight: 400;
-  font-size: 11px;
-  letter-spacing: 0;
-  color: color-mix(in srgb, var(--on-rail) 70%, transparent);
-}
-#nav .brand-sub {
-  font-weight: 500;
-  font-size: 10.5px;
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
-  color: color-mix(in srgb, var(--on-rail) 75%, transparent);
-  margin-top: 2px;
-}
-
 .nav-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   background: none;
   border: none;
   border-radius: var(--radius-control);
-  color: color-mix(in srgb, var(--on-rail) 92%, transparent);
+  color: var(--accent-text);
   text-align: left;
-  padding: 9px 12px;
+  padding: 8px 12px;
   font-size: 13px;
+  font-weight: 500;
   cursor: pointer;
   transition: background var(--motion-fast), color var(--motion-fast);
 }
-.nav-btn:hover { background: color-mix(in srgb, var(--on-rail) 10%, transparent); }
-/* A white plate with brand green text in both themes -- the lighter dark-mode
-   --accent-text would wash out against white. */
-.nav-btn.active { background: var(--white); color: var(--green-500); font-weight: 500; }
+.nav-btn:hover { background: var(--green-100); }
+.nav-btn.active { background: var(--green-100); color: var(--text-accent); box-shadow: inset 3px 0 0 var(--border-rule); }
+/* The version, at the foot of the nav. */
+.nav-footer {
+  margin-top: auto;
+  padding: 16px 12px 0;
+  border-top: 1px solid var(--border-hairline);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
 
 #main-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 #content {
@@ -183,12 +217,9 @@ code {
   font-size: 13px;
 }
 #team-banner p { margin: 2px 0; }
-#nav .team-line {
-  margin-top: 8px;
-  font-size: 11.5px;
-  font-weight: 500;
-  color: color-mix(in srgb, var(--on-rail) 85%, transparent);
-}
+/* How this computer is sharing the folder (see app.js), at the header's end
+   where AB Apps shows who is signed in. */
+#team-line { font-size: 13px; font-weight: 500; color: var(--text-muted); }
 
 /* Page titles: light green type over the 3px green rule. */
 h1 {
@@ -230,13 +261,13 @@ input[type=text], input[type=email], input[type=password], input[type=number], i
   border-color: var(--accent-text);
   box-shadow: 0 0 0 1px var(--accent-text);
 }
-::placeholder { color: var(--gray-400); }
+::placeholder { color: var(--text-muted); opacity: 0.8; }
 textarea { resize: vertical; min-height: 90px; }
 
 button.btn {
-  background: var(--green-500);
+  background: var(--fill-accent);
   color: var(--on-accent);
-  border: 1px solid var(--green-500);
+  border: 1px solid var(--fill-accent);
   border-radius: var(--radius-control);
   padding: 7px 14px;
   font-size: 13px;
@@ -244,8 +275,8 @@ button.btn {
   cursor: pointer;
   transition: background var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast);
 }
-button.btn:hover:not(:disabled) { background: var(--green-600); border-color: var(--green-600); }
-button.btn:active:not(:disabled) { background: var(--green-700); border-color: var(--green-700); }
+button.btn:hover:not(:disabled) { background: var(--fill-accent-hover); border-color: var(--fill-accent-hover); }
+button.btn:active:not(:disabled) { background: var(--fill-accent-active); border-color: var(--fill-accent-active); }
 button.btn:disabled { opacity: .45; cursor: default; }
 button.btn.secondary { background: var(--surface-card); color: var(--accent-text); border-color: var(--accent-text); }
 button.btn.secondary:hover:not(:disabled),
@@ -281,7 +312,7 @@ tr:hover td { background: var(--green-050); }
 }
 .badge-pending { background: var(--surface-neutral); color: var(--text-muted); }
 .badge-sent { background: var(--green-100); color: var(--accent-text); }
-.badge-responded { background: var(--green-500); color: var(--on-accent); }
+.badge-responded { background: var(--fill-accent); color: var(--on-accent); }
 .badge-email { border-color: var(--accent-text); color: var(--accent-text); }
 .badge-paper { border-color: var(--text-muted); color: var(--text-muted); }
 .badge-failed { background: var(--danger-tint); color: var(--danger); }
@@ -379,7 +410,7 @@ th.num, td.num { text-align: right; }
 .actions-cell .btn { margin: 2px 0 2px 4px; }
 .stat-card .num .of { font-size: 15px; font-weight: 500; color: var(--text-muted); }
 .check-label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
-.check-label input { width: 16px; height: 16px; margin: 0; accent-color: var(--green-500); cursor: pointer; }
+.check-label input { width: 16px; height: 16px; margin: 0; accent-color: var(--fill-accent); cursor: pointer; }
 .field-buttons { display: flex; gap: 8px; align-self: flex-end; margin-bottom: 12px; flex-wrap: wrap; }
 .mapping-table td { vertical-align: middle; }
 .mapping-table td.hint { margin: 0; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -443,7 +474,7 @@ th.num, td.num { text-align: right; }
 /* The last pinned column gets a heavier edge, so rows sliding under it read as such. */
 .sheet .sticky-last { border-right-color: var(--gray-400); }
 .sheet .sel-col { text-align: center; padding: 0; }
-.sheet .sel-col input, .sheet .cell-flag input { width: 15px; height: 15px; margin: 0; vertical-align: middle; accent-color: var(--green-500); cursor: pointer; }
+.sheet .sel-col input, .sheet .cell-flag input { width: 15px; height: 15px; margin: 0; vertical-align: middle; accent-color: var(--fill-accent); cursor: pointer; }
 .sheet td.cell { cursor: cell; }
 .sheet td.cell-flag { text-align: center; cursor: default; }
 .sheet td.cell-count { text-align: right; }
@@ -488,14 +519,13 @@ th.num, td.num { text-align: right; }
   min-width: 18px;
   padding: 0 6px;
   border-radius: 999px;
-  background: var(--white);
-  color: var(--green-500);
+  background: var(--fill-accent);
+  color: var(--on-accent);
   font-size: 11px;
   font-weight: 600;
   line-height: 18px;
   text-align: center;
 }
-.nav-btn.active .nav-badge { background: var(--green-500); color: var(--white); }
 
 .import-sources { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .import-sources .panel { margin-bottom: 12px; }
@@ -509,7 +539,7 @@ th.num, td.num { text-align: right; }
 .dup-table tbody th { white-space: nowrap; padding-right: 24px; }
 .dup-table thead th .hint { display: block; text-transform: none; letter-spacing: 0; font-weight: 400; margin-top: 2px; }
 .dup-choice { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
-.dup-choice input { margin-top: 3px; accent-color: var(--green-500); }
+.dup-choice input { margin-top: 3px; accent-color: var(--fill-accent); }
 .dup-table td.dup-excluded { opacity: 0.4; }
 .dup-table td.dup-excluded .dup-choice { pointer-events: none; }
 

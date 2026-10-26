@@ -184,7 +184,7 @@ async function refreshNavBadges() {
   if (!counts || !badge) return;
   const waiting = counts.duplicates + counts.sharedAddresses + counts.orgDuplicates;
   badge.textContent = waiting ? waiting.toLocaleString() : "";
-  badge.style.display = waiting ? "" : "none";
+  badge.style.display = waiting ? "inline-block" : "none";
 }
 
 // Sending email is the host computer's job (see main.js, requireHost):

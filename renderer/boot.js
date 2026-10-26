@@ -6,7 +6,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   const version = await window.api.getVersion();
-  qs("#version-tag").textContent = `v${version}`;
+  qs("#version-tag").textContent = version;
 
   // Kept in a shared spot (not just local to the Settings page) so a check
   // already run before the user opens Settings shows its result immediately

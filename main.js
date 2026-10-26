@@ -60,7 +60,7 @@ function savedTheme() {
 // styles.css's --surface-page for each theme, painted before the page loads
 // so a dark-mode window doesn't flash white on open.
 function windowBackground() {
-  return nativeTheme.shouldUseDarkColors ? "#1b1c1e" : "#ffffff";
+  return nativeTheme.shouldUseDarkColors ? "#1e1c1d" : "#ffffff";
 }
 
 nativeTheme.on("updated", () => {

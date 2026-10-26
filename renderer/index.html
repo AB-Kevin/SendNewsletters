@@ -4,23 +4,37 @@
 <meta charset="UTF-8" />
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'" />
 <title>SendNewsletters</title>
+<!-- Bundled, so the app looks right without an internet connection. -->
+<link rel="stylesheet" href="../node_modules/@fontsource/poppins/300.css" />
+<link rel="stylesheet" href="../node_modules/@fontsource/poppins/400.css" />
+<link rel="stylesheet" href="../node_modules/@fontsource/poppins/500.css" />
+<link rel="stylesheet" href="../node_modules/@fontsource/poppins/600.css" />
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <div id="app">
-    <nav id="nav">
-      <div class="brand">SendNewsletters <span class="version" id="version-tag"></span><div class="brand-sub">Anabaptist Brotherhood</div><div class="team-line" id="team-line" hidden></div></div>
-      <button class="nav-btn" data-page="contacts">Mailing List</button>
-      <button class="nav-btn" data-page="duplicates">Duplicates <span class="nav-badge" id="duplicates-badge"></span></button>
-      <button class="nav-btn" data-page="templates">Templates</button>
-      <button class="nav-btn" data-page="mailing-new">New Mailing</button>
-      <button class="nav-btn" data-page="mailings">Mailings</button>
-      <button class="nav-btn" data-page="delivery">Delivery</button>
-      <button class="nav-btn" data-page="settings">Settings</button>
-    </nav>
-    <div id="main-col">
-      <div id="team-banner" hidden></div>
-      <main id="content"></main>
+    <header class="app-header">
+      <div class="brand">
+        <img class="logo" src="assets/logo-primary-lockup.jpg" alt="Anabaptist Brotherhood" />
+        <span class="app-name">SendNewsletters</span>
+      </div>
+      <div class="app-header-end" id="team-line" hidden></div>
+    </header>
+    <div id="app-body">
+      <nav id="nav">
+        <button class="nav-btn" data-page="contacts">Mailing List</button>
+        <button class="nav-btn" data-page="duplicates">Duplicates <span class="nav-badge" id="duplicates-badge"></span></button>
+        <button class="nav-btn" data-page="templates">Templates</button>
+        <button class="nav-btn" data-page="mailing-new">New Mailing</button>
+        <button class="nav-btn" data-page="mailings">Mailings</button>
+        <button class="nav-btn" data-page="delivery">Delivery</button>
+        <button class="nav-btn" data-page="settings">Settings</button>
+        <div class="nav-footer">Version <span id="version-tag"></span></div>
+      </nav>
+      <div id="main-col">
+        <div id="team-banner" hidden></div>
+        <main id="content"></main>
+      </div>
     </div>
   </div>
   <div id="toast"></div>
