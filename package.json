@@ -45,6 +45,6 @@
     "electron-updater": "^6.8.9",
     "nodemailer": "^6.9.16",
     "papaparse": "^5.4.1",
-    "xlsx": "^0.18.5"
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   }
 }

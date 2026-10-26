@@ -120,6 +120,16 @@ The release appears on the repository's **Releases** page a few minutes later as
 - To build the installer locally instead, run `npm run dist`. It is written to `dist/`.
 - Keep the tag as `vX.Y.Z` and leave `artifactName` in package.json as it is: the workflow uploads the installer by that name, and `latest.yml` points the updater at it.
 
+## Dependencies
+
+Dependabot (`.github/dependabot.yml`) checks the npm dependencies and GitHub Actions every week.
+
+SheetJS (`xlsx`), which reads and writes spreadsheets, is the exception. It is installed from cdn.sheetjs.com because the npm registry copy is outdated and has known vulnerabilities, so Dependabot skips it. To update it, check [cdn.sheetjs.com](https://cdn.sheetjs.com) for the latest version and run:
+
+```
+npm install https://cdn.sheetjs.com/xlsx-X.Y.Z/xlsx-X.Y.Z.tgz
+```
+
 ## Project layout
 
 - `main.js` / `preload.js` — Electron main process and the IPC bridge exposed to the UI.

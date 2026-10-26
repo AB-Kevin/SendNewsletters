@@ -11,3 +11,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # SheetJS is installed from cdn.sheetjs.com because the npm registry copy
+      # is outdated and has known vulnerabilities. Dependabot can't update it;
+      # see the README for how to update it by hand.
+      - dependency-name: xlsx
