@@ -1,4 +1,4 @@
-# SendNewsletters 0.1.0
+# SendNewsletters
 
 A desktop tool for keeping the mailing list for the office's newsletters and magazines (MAAP Newsletter and Our Health to start) and sending each issue out: emailed as a PDF attachment to everyone who gets it by email, and an address list with copy counts for every address and organization that gets it by mail.
 

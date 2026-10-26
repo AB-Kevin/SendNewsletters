@@ -9,11 +9,11 @@
 // (ApplicationManager, BillManager) deliberately avoid in favor of plain JSON
 // sidecar files.
 //
-// Every change re-reads the file before writing it, so when two computers
-// share a data folder, each one's edits land on top of the other's latest
-// save. What it can't do is merge two saves of the same file made at the
-// same moment -- the later one wins -- which is why the Settings page asks
-// people not to edit on two computers at once.
+// Every change re-reads the file before writing it. On its own that can't
+// merge two computers' saves of the same file made at the same moment -- the
+// later one wins -- so when several computers share a data folder, only the
+// host writes these files, and the others send it their changes (see
+// "sharing a data folder" below, and lib/team.js).
 
 const fs = require("fs");
 const path = require("path");
@@ -85,14 +85,21 @@ function readJson(file, defaultValue) {
 function writeJson(file, value) {
   const temp = `${file}.tmp`;
   fs.writeFileSync(temp, JSON.stringify(value, null, 2), "utf8");
-  try {
-    fs.renameSync(temp, file);
-  } catch {
-    // Windows can refuse the replace while something (a virus scanner, or
-    // OneDrive syncing) briefly has the file open; fall back to writing it
-    // directly.
-    fs.writeFileSync(file, JSON.stringify(value, null, 2), "utf8");
-    fs.rmSync(temp, { force: true });
+  // Windows can refuse the replace while something (a virus scanner, or
+  // OneDrive syncing) briefly has the file open. Waiting and trying again
+  // keeps the save all-or-nothing; writing the file directly instead could
+  // leave half of it behind.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      fs.renameSync(temp, file);
+      return;
+    } catch (err) {
+      if (attempt >= 6 || !["EPERM", "EBUSY", "EACCES"].includes(err.code)) {
+        fs.rmSync(temp, { force: true });
+        throw err;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100 * attempt);
+    }
   }
 }
 
