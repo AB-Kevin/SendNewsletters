@@ -256,6 +256,8 @@ input[type=text], input[type=email], input[type=password], input[type=number], i
   color: var(--text-body);
   transition: border-color var(--motion-fast);
 }
+/* A value that comes from elsewhere (the name from AB Apps), shown but not editable here. */
+input[type=text]:disabled { background: var(--surface-card-alt); color: var(--text-muted); cursor: default; }
 :is(input[type=text], input[type=email], input[type=password], input[type=number], input[type=url], select, textarea):focus {
   outline: none;
   border-color: var(--accent-text);

@@ -16,7 +16,7 @@ const { renderTemplate, htmlToPlainText } = require("./lib/merge");
 const mailer = require("./lib/mailer");
 const duplicates = require("./lib/duplicates");
 const gravityForms = require("./lib/gravityForms");
-const { sharedServices } = require("./lib/abApps");
+const { readIdentity, watchIdentity, sharedServices } = require("./lib/abApps");
 const { Team, peopleDir, readPeople, isActive, activeHosts } = require("./lib/team");
 
 let mainWindow = null;
@@ -114,7 +114,18 @@ app.whenReady().then(() => {
     return;
   }
   store.init(dataDir, app.getPath("userData"));
+  abIdentity = readIdentity(app.getPath("appData"));
   openTeam();
+  // Signing in or out of AB Apps, or a manager's rename there, reaches the others right away.
+  watchIdentity(app.getPath("appData"), (next) => {
+    abIdentity = next;
+    try {
+      team?.setName(shownName(), abIdentity?.personId ?? null);
+    } catch {
+      // The data folder is unavailable for now; the next heartbeat writes the new name.
+    }
+    sendTeamStatus();
+  });
   nativeTheme.themeSource = savedTheme();
   createWindow();
 
@@ -315,6 +326,12 @@ let team = null;
 // writes the shared files.
 let actingHost = false;
 
+// Who is signed in to AB Apps on this computer, or null. While someone is,
+// others see that name instead of the one set in Settings, and this
+// computer's presence file records the AB Apps person. Each computer still
+// writes its own files, since OneDrive can't merge two writers.
+let abIdentity = null;
+
 // Who is using this computer, set up the first time the app runs. A new
 // install is the host.
 function identity() {
@@ -323,13 +340,17 @@ function identity() {
   return store.updateSettings({ personId: randomUUID(), personName: os.userInfo().username || "Me", isHost: true, hostSince: new Date().toISOString() });
 }
 
+/** The name others see: AB Apps' while someone is signed in there, otherwise the one set in Settings. */
+const shownName = () => abIdentity?.name ?? identity().personName;
+
 function openTeam() {
   const me = identity();
+  const who = { id: me.personId, name: shownName(), abAppsId: abIdentity?.personId ?? null };
   if (!team) {
-    team = new Team({ id: me.personId, name: me.personName });
+    team = new Team(who);
     watchTeam();
   } else {
-    team.identity = { id: me.personId, name: me.personName };
+    team.identity = who;
   }
   actingHost = false;
   team.setActing(false);
@@ -401,6 +422,7 @@ function teamStatus() {
   return {
     role: actingHost ? "host" : settings.isHost ? "waiting-host" : "editor",
     name: team.me.name,
+    abApps: abIdentity && { name: abIdentity.name },
     isHost: !!settings.isHost,
     host: hosts[0] ? { name: hosts[0].name, computer: hosts[0].computer, isMe: hosts[0].id === team.me.id } : null,
     otherHosts: hosts.slice(1).map((h) => h.name),
@@ -418,13 +440,14 @@ function sendTeamStatus() {
 ipcMain.handle("team:status", async () => teamStatus());
 
 ipcMain.handle("team:save", async (event, { name, isHost }) => {
-  const clean = cleanText(name);
+  const was = store.getSettings();
+  // While someone is signed in to AB Apps the name comes from there, and the one set here waits.
+  const clean = abIdentity ? was.personName : cleanText(name);
   if (!clean) throw new Error("Enter the name others will see.");
   if (clean.length > 60) throw new Error("Use 60 characters or fewer for the name.");
-  const was = store.getSettings();
   const hostSince = isHost ? (was.isHost ? was.hostSince : new Date().toISOString()) : null;
   store.updateSettings({ personName: clean, isHost: !!isHost, hostSince });
-  if (team.me.name !== clean) team.setName(clean);
+  if (team.me.name !== shownName()) team.setName(shownName());
   if (!!isHost !== !!was.isHost) team.setRole(!!isHost, hostSince);
   updateRole();
   return teamStatus();

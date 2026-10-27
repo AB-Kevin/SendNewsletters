@@ -31,7 +31,9 @@ So John can get MAAP Newsletter by email and Our Health at his address by mail, 
 
 ## Settings from AB Apps
 
-While someone is signed in to [AB Apps](https://github.com/AB-Kevin/ab-apps) and a manager has set them on its **Mail and website** page, SendNewsletters uses AB Apps' mail server and website instead of its own (`lib/abApps.js`). Mailings go through AB Apps' server, without signing in, and signups are read with its website address and read-only key. **Settings** shows both, with this computer's own settings folded away under them for when AB Apps doesn't set one. Which form is the signup form, and the test address, stay per computer.
+While someone is signed in to [AB Apps](https://github.com/AB-Kevin/ab-apps), the others using the folder see their AB Apps name instead of the one set under **Settings → Sharing**, which is then read-only. Signing in or out there shows up within a few seconds. Each computer still writes its own files in the folder, and records the AB Apps person in them.
+
+While someone is signed in and a manager has set them on AB Apps' **Mail and website** page, SendNewsletters also uses AB Apps' mail server and website instead of its own (`lib/abApps.js`). Mailings go through AB Apps' server, without signing in, and signups are read with its website address and read-only key. **Settings** shows both, with this computer's own settings folded away under them for when AB Apps doesn't set one. Which form is the signup form, and the test address, stay per computer.
 
 ## Getting started
 

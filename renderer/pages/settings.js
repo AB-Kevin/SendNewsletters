@@ -136,8 +136,8 @@ window.Pages.settings = {
         <div class="row" style="align-items:flex-end">
           <div class="field" style="flex:1;max-width:320px">
             <label for="team-name">Your name</label>
-            <input type="text" id="team-name" value="${escapeHtml(team?.name || "")}" />
-            <p class="hint">Shown to others using the same folder.</p>
+            <input type="text" id="team-name" value="${escapeHtml(team?.name || "")}" ${team?.abApps ? "disabled" : ""} />
+            <p class="hint" id="team-name-hint">Shown to others using the same folder.</p>
           </div>
           <label class="check-label" style="margin-bottom:28px"><input type="checkbox" id="team-host" ${team?.isHost ? "checked" : ""} /> This computer is the host</label>
           <button class="btn" id="team-save-btn" type="button" style="margin-bottom:22px">Save</button>
@@ -258,6 +258,14 @@ window.Pages.settings = {
       }[status.role];
       const unsaved = status.unsaved ? ` ${plural(status.unsaved, "change")} made here ${status.unsaved === 1 ? "is" : "are"} waiting to be saved.` : "";
       teamSummary.textContent = summary + unsaved;
+      // While someone is signed in to AB Apps, others see that name, and it can't be changed here.
+      const nameInput = qs("#team-name", container);
+      if (status.abApps) nameInput.value = status.abApps.name;
+      else if (nameInput.disabled) nameInput.value = status.name; // just signed out: the name set here again
+      nameInput.disabled = !!status.abApps;
+      qs("#team-name-hint", container).textContent = status.abApps
+        ? "Shown to others using the same folder. It comes from AB Apps, where you're signed in; a manager changes it there."
+        : "Shown to others using the same folder.";
       const others = status.people.filter((p) => !p.isMe);
       qs("#team-people", container).innerHTML = others.length
         ? others.map((p) => `<li>${escapeHtml(p.name)} — ${escapeHtml(p.computer || "")}${p.role === "host" ? " (host)" : ""}</li>`).join("")
