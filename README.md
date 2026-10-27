@@ -79,6 +79,20 @@ A row updates someone already on the list when the name matches **and** so does 
 - Mail/Email/Copies columns can be general (for the ticked newsletters) or one newsletter's own ("Our Health: Mail"); yes/no columns can hold anything yes/no-ish: Yes/No, X or blank, TRUE/FALSE, 1/0.
 - People at the same street, Address 2 and ZIP share a household. A new person joining one turns a newsletter's Mail on if their row says so, and can raise the household's copies but never lower them. Someone already on the list whose row has a different street has moved: they move out, and the rest of their household stays.
 - In person mode, a row with an organization but no person's name is the organization itself.
+- **Member ID:** a row with one updates whoever on the list has that Member ID, whatever their name. Without a match it falls back to name and email or address, but never to someone with a different Member ID. A **Member status** column saying Inactive stops every newsletter that person gets (and their household's mail, if they live alone there), and an inactive row that isn't on the list isn't added.
+- **Only for people new to the list** signs up only newcomers for the ticked newsletters, so a re-import doesn't sign someone up again for a newsletter they stopped.
+
+## The membership export
+
+The membership software's household export (`Membergroup<date>.csv`) is recognized by its columns and set up the way the office decided (`lib/membership.js`):
+
+- Each household's head is the person on the list: the household file already names them, so the individual file isn't needed. Their Member ID is the household's **GroupCode**, shown and editable in the Member ID column on the Mailing List.
+- Only one plan's households come in, the Medical Aid & Alms Plan unless another is chosen under **Households in**.
+- A household new to the list gets Our Health by mail; anyone already on it keeps what they get.
+- Inactive households stop getting newsletters, as above.
+- Only names, the email address, the address, the church and the Member ID and status are mapped. Everything else in the export, including its identity, health and claims columns, is left as **Don't import**. The middle name is left out too, so names on envelopes stay as they are; map it if middle initials are wanted.
+
+The first time, nobody on the list has a Member ID yet, so members are matched by name and email or address. Check the preview's updates and the Duplicates page after that first import.
 
 ## How duplicates are found
 
@@ -140,5 +154,5 @@ npm install https://cdn.sheetjs.com/xlsx-X.Y.Z/xlsx-X.Y.Z.tgz
 
 - `main.js` / `preload.js` — Electron main process and the IPC bridge exposed to the UI.
 - `db/store.js` — JSON-file data store (people, households, organizations, newsletters, templates, mailings, mailing recipients) in the data folder, plus this computer's own settings.
-- `lib/` — spreadsheet import (`listImport.js`), name/address comparison (`matching.js`), the duplicate checker (`duplicates.js`), the Gravity Forms client (`gravityForms.js`), the delivery rules shared with the UI (`contactRules.js`), sharing a data folder between computers (`team.js`), recipient filters, template merging, and SMTP sending.
+- `lib/` — spreadsheet import (`listImport.js`) and the membership export's set-up (`membership.js`), name/address comparison (`matching.js`), the duplicate checker (`duplicates.js`), the Gravity Forms client (`gravityForms.js`), the delivery rules shared with the UI (`contactRules.js`), sharing a data folder between computers (`team.js`), recipient filters, template merging, and SMTP sending.
 - `renderer/` — the UI (plain HTML/CSS/JS, no build step); `grid.js` is the editable spreadsheet both Mailing List tabs use.

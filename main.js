@@ -16,6 +16,7 @@ const { renderTemplate, htmlToPlainText } = require("./lib/merge");
 const mailer = require("./lib/mailer");
 const duplicates = require("./lib/duplicates");
 const gravityForms = require("./lib/gravityForms");
+const { membershipPreset } = require("./lib/membership");
 const { readIdentity, watchIdentity, sharedServices } = require("./lib/abApps");
 const { Team, peopleDir, readPeople, isActive, activeHosts } = require("./lib/team");
 
@@ -470,7 +471,7 @@ function requireHost(what) {
 // People, households (addresses) and organizations, and the newsletters each
 // gets -- see lib/contactRules.js.
 const BLANK_ADDRESS = { addressLine1: "", addressLine2: "", city: "", state: "", zip: "" };
-const BLANK_CONTACT = { name: "", email: "", orgId: null, householdId: null, subs: {}, sourceBatch: "" };
+const BLANK_CONTACT = { name: "", email: "", memberId: "", orgId: null, householdId: null, subs: {}, sourceBatch: "" };
 const BLANK_HOUSEHOLD = { ...BLANK_ADDRESS, subs: {} };
 const BLANK_ORG = { name: "", attn: "", email: "", ...BLANK_ADDRESS, subs: {}, sourceBatch: "" };
 
@@ -815,11 +816,14 @@ ipcMain.handle("import:preview", async (event, source) => {
   }
   const { headers, rows } = readImportSource(source);
   const publications = store.list("publications");
+  // The membership software's export comes set up as the office decided (lib/membership.js).
+  const membership = source.kind === "file" ? membershipPreset(headers, rows, publications) : null;
   return {
     headers,
     totalRows: rows.length,
     samples: Object.fromEntries(headers.map((h) => [h, listImport.sampleValues(rows, h, 3)])),
-    mapping: listImport.guessMapping(headers, rows, publications),
+    mapping: membership ? membership.mapping : listImport.guessMapping(headers, rows, publications),
+    membership,
     targets: listImport.importTargets(publications),
     deliveryDefaults: listImport.DELIVERY_DEFAULTS,
     publications,
@@ -1063,13 +1067,14 @@ const addressCells = (place) => Object.fromEntries(Object.entries(ADDRESS_COLUMN
 ipcMain.handle("contacts:export", async (event, ids) => {
   const idSet = new Set(ids || []);
   const list = loadList();
-  const columns = ["Name", "Organization", ...publicationColumns(list.publications), "Email Address", ...Object.keys(ADDRESS_COLUMNS), "Source"];
+  const columns = ["Name", "Member ID", "Organization", ...publicationColumns(list.publications), "Email Address", ...Object.keys(ADDRESS_COLUMNS), "Source"];
   const rows = list.contacts
     .filter((c) => idSet.has(c.id))
     .map((c) => {
       const h = list.householdById.get(c.householdId) || null;
       return {
         Name: c.name,
+        "Member ID": c.memberId || "",
         Organization: list.orgById.get(c.orgId)?.name || "",
         ...publicationCells(list.publications, c, h),
         "Email Address": c.email,
@@ -1189,6 +1194,8 @@ ipcMain.handle("contacts:merge", async (event, { keepId, removeIds, values, hous
   store.update("contacts", keepId, {
     name: cleanText(values.name),
     email: cleanText(values.email),
+    // The kept contact's Member ID, or the one any of the others had.
+    memberId: keep.memberId || group.find((c) => c.memberId)?.memberId || "",
     orgId,
     householdId: householdId || null,
     subs: emailSubs,

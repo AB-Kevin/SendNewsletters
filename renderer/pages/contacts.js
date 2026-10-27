@@ -147,6 +147,7 @@ window.Pages.contacts = {
         ...publicationColumns(false),
         { key: "email", label: "Email address", width: 220 },
         ...ADDRESS_COLUMNS.map((c) => ({ ...c, group: true })),
+        { key: "memberId", label: "Member ID", width: 110, title: "The membership software's Member ID, for members; imports match on it" },
         SOURCE_COLUMN,
       ];
     }
@@ -168,7 +169,7 @@ window.Pages.contacts = {
         return { value: R.sub(h, pubId).copies ?? "", problem, covered: coveredNote };
       }
       if (col.key === "orgName") return { value: c._pendingOrgName ?? orgOf(c)?.name ?? "" };
-      if (col.key === "name" || col.key === "sourceBatch") return { value: c[col.key] };
+      if (col.key === "name" || col.key === "memberId" || col.key === "sourceBatch") return { value: c[col.key] || "" };
       if (col.key === "email") return { value: c.email, problem: personProblems(c).email };
       return { value: h?.[col.key] || "", problem: col.key === "addressLine1" ? personProblems(c).addressLine1 : "" };
     }
@@ -282,7 +283,7 @@ window.Pages.contacts = {
       const rows = [];
       const searchParts = (c) => {
         const h = householdOf(c) || {};
-        return [c.name, c.email, orgOf(c)?.name, c.sourceBatch, ...R.ADDRESS_FIELDS.map((f) => h[f])];
+        return [c.name, c.email, c.memberId, orgOf(c)?.name, c.sourceBatch, ...R.ADDRESS_FIELDS.map((f) => h[f])];
       };
       if (tab === "orgs") {
         // An organization is shown if it matches, or if one of its members
@@ -602,7 +603,7 @@ window.Pages.contacts = {
         }
         const c = member || byId.get(rowId);
         if (!c) continue;
-        if (["name", "email", "orgName"].includes(col.key)) changes.push({ kind: "contact", id: c.id, path: col.key, value });
+        if (["name", "email", "memberId", "orgName"].includes(col.key)) changes.push({ kind: "contact", id: c.id, path: col.key, value });
         else if (field === "email" && pubId) changes.push({ kind: "contact", id: c.id, path: `subs.${pubId}.email`, value });
         else {
           // Clearing a household cell for someone with no address is nothing to do.

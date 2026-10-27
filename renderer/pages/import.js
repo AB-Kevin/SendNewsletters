@@ -10,6 +10,7 @@ const IMPORT_FIELD_LABELS = {
   state: "State",
   zip: "ZIP",
   household: "Address (moved, or joined someone at the same address)",
+  memberId: "Member ID",
 };
 
 // Remembers which newsletters were ticked last time for each kind of source
@@ -116,6 +117,11 @@ window.Pages.import = {
         defaultCopies: qs("#default-copies", container).value.trim() || "1",
         deliveryDefault: qs("#delivery-default", container).value,
         replaceDelivery: mode() === "person" && qs("#replace-delivery", container).checked,
+        newOnly: qs("#new-only", container).checked,
+        // A membership export imports one plan's households (lib/membership.js).
+        only: preview.membership && qs("#member-plan", container).value
+          ? { column: preview.membership.planColumn, value: qs("#member-plan", container).value }
+          : null,
       };
     }
 
@@ -151,8 +157,28 @@ window.Pages.import = {
         area.innerHTML = `<div class="panel"><p class="empty">This file doesn't have any columns to import. The first row should be the column headings.</p></div>`;
         return;
       }
-      const remembered = rememberedPublications(source.kind) || [];
+      // A membership export ticks what new member households get (lib/membership.js).
+      const member = preview.membership;
+      const remembered = member ? member.options.publicationIds : rememberedPublications(source.kind) || [];
       area.innerHTML = `
+        ${
+          member
+            ? `<div class="panel">
+          <h2 style="margin-top:0">The membership software's household export</h2>
+          <p class="hint" style="margin-top:0">Set up for it: each household's head is the person on the list, matched by Member ID (or, the first time,
+            by name and email or address). A household new to the list gets the newsletters ticked below by mail; anyone already on it keeps what they get.
+            An inactive household stops getting newsletters, and isn't added if it's new. Identity and health columns aren't imported.</p>
+          <div class="field" style="max-width:420px">
+            <label for="member-plan">Households in</label>
+            <select id="member-plan">
+              ${member.plans
+                .map((p) => `<option value="${escapeHtml(p.name)}" ${p.name === member.options.only?.value ? "selected" : ""}>${escapeHtml(p.name)} (${plural(p.count, "household")})</option>`)
+                .join("")}
+            </select>
+          </div>
+        </div>`
+            : ""
+        }
         <div class="panel">
           <div class="row" style="align-items:flex-start;gap:28px">
             <div class="field">
@@ -201,10 +227,11 @@ window.Pages.import = {
             <div class="field" style="flex:1;min-width:260px">
               <label for="delivery-default">How they get it</label>
               <select id="delivery-default">
-                ${preview.deliveryDefaults.map((d) => `<option value="${d.value}">${escapeHtml(d.label)}</option>`).join("")}
+                ${preview.deliveryDefaults.map((d) => `<option value="${d.value}" ${d.value === member?.options.deliveryDefault ? "selected" : ""}>${escapeHtml(d.label)}</option>`).join("")}
               </select>
               <p class="hint" id="delivery-hint"></p>
               <label class="check-label" id="replace-delivery-label"><input type="checkbox" id="replace-delivery" /> Use this for everyone in the file, replacing how they get it now</label>
+              <label class="check-label" id="new-only-label"><input type="checkbox" id="new-only" ${member?.options.newOnly ? "checked" : ""} /> Only for people new to the list; leave everyone already on it as they are</label>
             </div>
             <div class="field">
               <label for="default-copies">Copies</label>
@@ -246,15 +273,18 @@ window.Pages.import = {
       );
       qsa(".import-pub", area).forEach((box) =>
         box.addEventListener("change", () => {
-          rememberPublications(source.kind, tickedPublications());
+          if (!member) rememberPublications(source.kind, tickedPublications());
           schedulePlan();
         })
       );
       for (const id of ["#delivery-default", "#default-copies", "#batch-name"]) qs(id, area).addEventListener("input", schedulePlan);
-      qs("#replace-delivery", area).addEventListener("change", () => {
-        renderOptionHints();
-        schedulePlan();
-      });
+      for (const id of ["#replace-delivery", "#new-only"]) {
+        qs(id, area).addEventListener("change", () => {
+          renderOptionHints();
+          schedulePlan();
+        });
+      }
+      qs("#member-plan", area)?.addEventListener("change", schedulePlan);
       qs("#cancel-import-btn", area).addEventListener("click", () => navigate("contacts"));
       qs("#commit-import-btn", area).addEventListener("click", commit);
       renderOptionHints();
@@ -275,7 +305,16 @@ window.Pages.import = {
       if (replaceBox.disabled) replaceBox.checked = false;
       qs("#replace-delivery-label", container).style.display = mode() === "org" ? "none" : "";
       const replacing = replaceBox.checked;
-      qs("#delivery-heading", container).textContent = replacing ? "For everyone in the file" : "For anyone new to a ticked newsletter";
+      // Replacing how everyone gets it and signing up only newcomers can't both be meant.
+      const newOnlyBox = qs("#new-only", container);
+      newOnlyBox.disabled = mode() === "org" || replacing;
+      if (newOnlyBox.disabled) newOnlyBox.checked = false;
+      qs("#new-only-label", container).style.display = mode() === "org" ? "none" : "";
+      qs("#delivery-heading", container).textContent = replacing
+        ? "For everyone in the file"
+        : newOnlyBox.checked
+        ? "For people new to the list"
+        : "For anyone new to a ticked newsletter";
       qs("#keeps-hint", container).textContent = replacing
         ? "Everyone in the file gets the ticked newsletters this way, instead of how they get them now — except where the file has a Mail or Email column for it. " +
           "Anyone whose organization gets the newsletter as a batch is left as they are, and so is anyone without the address it takes. A blank cell never erases an address."
@@ -352,6 +391,13 @@ window.Pages.import = {
           ${stats.skipped ? `<div class="stat-card"><div class="num">${stats.skipped.toLocaleString()}</div><div class="label">Rows skipped</div></div>` : ""}
         </div>
         ${starting ? `<p class="hint">${starting}.</p>` : ""}
+        ${stats.outsideOnly ? `<p class="hint">${plural(stats.outsideOnly, "row")} in other plans ${stats.outsideOnly === 1 ? "is" : "are"} left out.</p>` : ""}
+        ${
+          stats.inactiveStopped
+            ? `<p class="hint" style="color:var(--warn)">${plural(stats.inactiveStopped, "member")} on the list ${stats.inactiveStopped === 1 ? "is" : "are"} inactive now and will stop getting newsletters.</p>`
+            : ""
+        }
+        ${stats.inactiveSkipped ? `<p class="hint">${plural(stats.inactiveSkipped, "inactive member")} not on the list ${stats.inactiveSkipped === 1 ? "isn't" : "aren't"} added.</p>` : ""}
         ${
           stats.householdJoins
             ? `<p class="hint">${plural(stats.householdJoins, "person", "people")} ${stats.householdJoins === 1 ? "lives" : "live"} at an address someone else on the list already has, and will share that household: one bundle for the address.</p>`
@@ -393,8 +439,8 @@ window.Pages.import = {
             : ""
         }
         ${!options().publicationIds.length && mode() === "person" && !Object.keys(stats.starting || {}).length ? `<p class="hint">No newsletters ticked: this only adds people and updates names and addresses.</p>` : ""}
-        <p class="hint">A row updates someone already on the list when the name matches and so does the email address or the street address; organizations match by name.
-          Repeats within the file are merged too. People at the same street address, Address 2 and ZIP share one household.</p>
+        <p class="hint">A row updates someone already on the list when the Member ID matches, or else when the name matches and so does the email address or the street address
+          (but never someone with a different Member ID); organizations match by name. Repeats within the file are merged too. People at the same street address, Address 2 and ZIP share one household.</p>
         ${
           matches.length
             ? `<button class="btn secondary" id="toggle-matches" type="button">Show the ${plural(stats.updated, "update")}</button>
@@ -412,7 +458,8 @@ window.Pages.import = {
 
     function matchesTable(matches, total) {
       const side = (s) =>
-        `${escapeHtml(s.name || "(no name)")}${s.orgName ? `<br/><span class="hint">${escapeHtml(s.orgName)}</span>` : ""}` +
+        `${escapeHtml(s.name || "(no name)")}${s.memberId ? ` <span class="hint">(${escapeHtml(s.memberId)})</span>` : ""}` +
+        `${s.orgName ? `<br/><span class="hint">${escapeHtml(s.orgName)}</span>` : ""}` +
         `${s.email ? `<br/><span class="hint">${escapeHtml(s.email)}</span>` : ""}${s.address ? `<br/><span class="hint">${escapeHtml(s.address)}</span>` : ""}` +
         `${s.gets.length ? `<br/><span class="hint">Gets ${s.gets.map(escapeHtml).join(", ")}</span>` : ""}`;
       const label = (f) => (f.startsWith("pub:") ? f.slice(4) : IMPORT_FIELD_LABELS[f] || f);
