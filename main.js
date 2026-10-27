@@ -17,6 +17,7 @@ const mailer = require("./lib/mailer");
 const duplicates = require("./lib/duplicates");
 const gravityForms = require("./lib/gravityForms");
 const { membershipPreset } = require("./lib/membership");
+const { appFolder, chooseFolder, readMovedNote, moveToAbApps } = require("ab-common/appfolder");
 const { readIdentity, watchIdentity, sharedServices } = require("./lib/abApps");
 const { Team, peopleDir, readPeople, isActive, activeHosts } = require("./lib/team");
 
@@ -109,6 +110,12 @@ app.on("second-instance", () => {
 
 app.whenReady().then(() => {
   if (!isPrimaryInstance) return;
+  abIdentity = readIdentity(app.getPath("appData"));
+  try {
+    choosePlace();
+  } catch (err) {
+    console.error("Couldn't use the AB Apps folder:", err);
+  }
   const dataDir = resolveDataDir();
   if (!dataDir) {
     app.quit();
@@ -119,7 +126,9 @@ app.whenReady().then(() => {
   openTeam();
   // Signing in or out of AB Apps, or a manager's rename there, reaches the others right away.
   watchIdentity(app.getPath("appData"), (next) => {
+    const folderChanged = next?.dataDir !== abIdentity?.dataDir;
     abIdentity = next;
+    if (folderChanged) followToAbApps();
     try {
       team?.setName(shownName(), abIdentity?.personId ?? null);
     } catch {
@@ -157,6 +166,59 @@ const PICKED_FOLDER_NAME = "SendNewsletters Data";
 const defaultDataDir = () => path.join(app.getPath("userData"), "sendnewsletters-data");
 const locationFile = () => path.join(app.getPath("userData"), "data-location.json");
 const samePath = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+
+// ---- the AB Apps folder ----
+// The mailing list lives in the SendNewsletters subfolder of the AB Apps
+// folder (ab-common's appfolder.js). A list that's still somewhere else stays
+// there until a manager on the host computer moves it from Settings; every
+// other computer follows the note the move leaves.
+const FOLDER_NAME = "SendNewsletters";
+let folderChoice = { reason: "own", target: null };
+
+function abAppsTarget() {
+  return abIdentity?.dataDir && fs.existsSync(abIdentity.dataDir) ? appFolder(abIdentity, FOLDER_NAME) : null;
+}
+
+// Works out where the list is. When that's the AB Apps subfolder but this
+// computer uses another, points it there and returns the folder; otherwise null.
+function choosePlace() {
+  const own = configuredDataDir() || defaultDataDir();
+  const target = abAppsTarget();
+  folderChoice = { ...chooseFolder({ own, target, hasData: (dir) => store.isDataFolder(dir) }), target };
+  if (folderChoice.reason !== "ab-apps" || samePath(own, folderChoice.dir)) return null;
+  fs.mkdirSync(folderChoice.dir, { recursive: true });
+  // This computer's own changes made between the move's copy and now are only
+  // in the old folder; its files there have one writer -- this computer.
+  // Read from the file, since this runs before the store is opened at startup.
+  let mine = null;
+  try {
+    mine = JSON.parse(fs.readFileSync(path.join(app.getPath("userData"), "local-settings.json"), "utf8")).personId || null;
+  } catch {
+    // No settings yet: nothing of this computer's to bring across.
+  }
+  if (mine && readMovedNote(own)) {
+    for (const name of [`${mine}.json`, `${mine}.changes.json`]) {
+      const a = path.join(own, "people", name);
+      const b = path.join(folderChoice.dir, "people", name);
+      try {
+        if (fs.existsSync(a) && (!fs.existsSync(b) || fs.statSync(a).mtimeMs > fs.statSync(b).mtimeMs)) {
+          fs.mkdirSync(path.dirname(b), { recursive: true });
+          fs.copyFileSync(a, b);
+        }
+      } catch {
+        // Left in the old folder; nothing there is removed.
+      }
+    }
+  }
+  rememberDataDir(folderChoice.dir);
+  return folderChoice.dir;
+}
+
+// Opens the list in the AB Apps subfolder, once it's there.
+function followToAbApps() {
+  const dir = choosePlace();
+  if (dir) switchDataDir(dir, "The mailing list moved to the AB Apps folder, where every computer finds it.");
+}
 
 function configuredDataDir() {
   try {
@@ -296,7 +358,45 @@ async function moveDataTo(target) {
   return { changed: true };
 }
 
-ipcMain.handle("data:get-location", async () => ({ dataDir: store.getDataDir(), isDefault: samePath(store.getDataDir(), defaultDataDir()) }));
+ipcMain.handle("data:get-location", async () => ({
+  dataDir: store.getDataDir(),
+  isDefault: samePath(store.getDataDir(), defaultDataDir()),
+  // Where the list is: "ab-apps", "own", or "not-moved" with where it belongs,
+  // and whether this computer can move it (the host, with a manager signed in).
+  folder: { reason: folderChoice.reason, target: folderChoice.target, canMove: actingHost && abIdentity?.class === "manager" },
+}));
+
+// A manager on the host moves the list into the AB Apps folder, once, after
+// saving everyone's waiting changes. Every other computer follows the note
+// it leaves, and the old folder is kept as it was.
+ipcMain.handle("data:move-to-ab-apps", async () => {
+  if (folderChoice.reason !== "not-moved") throw new Error("The mailing list is already in the AB Apps folder.");
+  requireHost("moves the mailing list");
+  if (abIdentity?.class !== "manager") throw new Error("Only a manager can move the mailing list.");
+  if (sendsInFlight.size) throw new Error("Wait for the mailing that's sending to finish first.");
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: "question",
+    buttons: ["Move", "Cancel"],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+    message: "Move the mailing list to the AB Apps folder?",
+    detail: `Everything in ${store.getDataDir()} is copied to ${folderChoice.target}, and every computer uses it from there. The current folder is left as it was, as a backup you can delete later.`,
+  });
+  if (response !== 0) return { changed: false };
+  saveIncoming();
+  const from = store.getDataDir();
+  team.close(); // nothing more is written to the old folder from here
+  let files;
+  try {
+    files = moveToAbApps({ from, to: folderChoice.target, folder: FOLDER_NAME, by: abIdentity.name });
+  } catch (err) {
+    openTeam(); // back to the old folder, which is unchanged
+    throw err;
+  }
+  switchDataDir(choosePlace() || folderChoice.target, `The mailing list moved to the AB Apps folder: ${files.toLocaleString()} files, which every computer finds there.`);
+  return { changed: true };
+});
 
 ipcMain.handle("data:choose-location", async () => {
   const result = await dialog.showOpenDialog(mainWindow, { title: "Choose where to keep the mailing list", properties: ["openDirectory", "createDirectory"] });
@@ -392,6 +492,10 @@ function watchTeam() {
   // Someone arrived, left, or sent changes: re-check who's host, and as
   // host, save what's new.
   team.on("people", () => updateRole());
+  // A manager moved the list while this computer had it open: follow it.
+  team.on("tick", () => {
+    if (folderChoice.reason === "not-moved" && readMovedNote(store.getDataDir())) followToAbApps();
+  });
   // The host saved: everyone else shows the new list.
   team.on("shared", () => {
     if (actingHost) return;

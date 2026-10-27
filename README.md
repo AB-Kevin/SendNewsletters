@@ -107,6 +107,8 @@ Separate households are suggested as one when the street and ZIP match, unless b
 
 ## Data location
 
+**In the AB Apps folder.** While someone is signed in to [AB Apps](https://github.com/AB-Kevin/ab-apps), SendNewsletters keeps the mailing list in its `SendNewsletters` subfolder of the AB Apps folder, and every computer finds it there by itself, so nobody chooses a folder. The mailing list that's still somewhere else stays there until a manager, on the host computer, moves it once, from Settings with **Move to the AB Apps folder**: it's copied into the subfolder, the old folder is kept as it was, and a note left there sends every other computer along within a minute or so. Without AB Apps, the folder is chosen as below. The host saves everyone's waiting changes first.
+
 **Settings → Data location → Change…** moves the list to any folder — on OneDrive, say, to back it up or to share one list between computers:
 
 - If the folder picked already has a SendNewsletters list (another computer's, say), you're asked whether to use that list. If not, you're asked whether to copy this computer's list there or start an empty one. Picking a folder that already has other files in it puts the list in a **SendNewsletters Data** folder inside it.

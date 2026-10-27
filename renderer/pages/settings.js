@@ -116,15 +116,23 @@ window.Pages.settings = {
       <div class="panel">
         <h2 style="margin-top:0">Data location</h2>
         <p class="hint" style="margin-top:0">The mailing list, newsletters, templates and their PDFs, and the record of every mailing are kept in this folder${
-          location.isDefault ? " on this computer" : ""
+          location.folder?.reason === "ab-apps" ? " — SendNewsletters' subfolder of the AB Apps folder, which every computer finds by itself" : location.isDefault ? " on this computer" : ""
         }:</p>
         <div class="row">
           <code>${escapeHtml(location.dataDir)}</code>
           <button class="btn secondary" id="open-data-dir-btn" type="button">Open folder</button>
-          <button class="btn secondary" id="change-data-dir-btn" type="button">Change…</button>
-          ${location.isDefault ? "" : `<button class="btn secondary" id="default-data-dir-btn" type="button">Use this computer's own folder</button>`}
+          ${location.folder?.reason === "ab-apps" ? "" : `<button class="btn secondary" id="change-data-dir-btn" type="button">Change…</button>`}
+          ${location.isDefault || location.folder?.reason === "ab-apps" ? "" : `<button class="btn secondary" id="default-data-dir-btn" type="button">Use this computer's own folder</button>`}
         </div>
-        <p class="hint">To share one list between computers, choose the same folder on each of them — on OneDrive, say. Each computer keeps its own email,
+        ${
+          location.folder?.reason === "not-moved"
+            ? `<p class="shared-note">The mailing list belongs in the AB Apps folder now, where every computer finds it by itself: <strong>${escapeHtml(location.folder.target)}</strong>.
+          Moving it copies everything there; this folder is kept as it was, and every other computer switches over on its own.
+          ${location.folder.canMove ? "" : "A manager can move it, on the host computer."}</p>
+          ${location.folder.canMove ? `<div class="row"><button class="btn" id="move-data-btn" type="button">Move to the AB Apps folder</button></div>` : ""}`
+            : ""
+        }
+        <p class="hint" ${location.folder?.reason === "own" ? "" : "hidden"}>To share one list between computers, choose the same folder on each of them — on OneDrive, say. Each computer keeps its own email,
           signup form and appearance settings, except the mail server and website when a manager sets them in AB Apps.</p>
       </div>
 
@@ -245,7 +253,8 @@ window.Pages.settings = {
         toast(err.message, true);
       }
     };
-    qs("#change-data-dir-btn", container).addEventListener("click", () => moveData(window.api.chooseDataLocation));
+    qs("#change-data-dir-btn", container)?.addEventListener("click", () => moveData(window.api.chooseDataLocation));
+    qs("#move-data-btn", container)?.addEventListener("click", () => moveData(window.api.moveDataToAbApps));
 
     const teamSummary = qs("#team-summary", container);
     const onPage = () => document.body.contains(teamSummary);

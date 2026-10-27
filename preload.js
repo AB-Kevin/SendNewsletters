@@ -78,6 +78,7 @@ contextBridge.exposeInMainWorld("api", {
 
   confirm: (message, okLabel) => invoke("dialog:confirm", message, okLabel),
   openPath: (filePath) => invoke("shell:open-path", filePath),
+  moveDataToAbApps: () => invoke("data:move-to-ab-apps"),
   getDataLocation: () => invoke("data:get-location"),
   chooseDataLocation: () => invoke("data:choose-location"),
   useDefaultDataLocation: () => invoke("data:use-default"),
