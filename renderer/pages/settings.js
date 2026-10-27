@@ -1,5 +1,12 @@
 "use strict";
 
+// The mail server AB Apps shares, when a manager has set one there.
+function sharedMailNote(mail) {
+  const from = mail.fromName ? `${mail.fromName} <${mail.fromEmail}>` : mail.fromEmail;
+  return `<p class="shared-note">Mail goes through the server a manager set in AB Apps: <strong>${escapeHtml(mail.host)}</strong>, port ${mail.port},
+          from ${escapeHtml(from)}. A manager changes it on AB Apps' Mail and website page.</p>`;
+}
+
 window.Pages.settings = {
   async render(container) {
     const settings = await window.api.getSettings();
@@ -10,10 +17,12 @@ window.Pages.settings = {
 
     container.innerHTML = `
       <h1>Settings</h1>
-      <p class="subtitle">Emails are sent through your own email account via SMTP. Signups come from a Gravity Forms form on the website.</p>
+      <p class="subtitle">Emails are sent over SMTP, and signups come from a Gravity Forms form on the website. A manager can set both once for everyone in AB Apps.</p>
 
       <div class="panel">
         <h2 style="margin-top:0">SMTP</h2>
+        ${settings.sharedMail ? `${sharedMailNote(settings.sharedMail)}
+        <details class="own-settings"><summary>This computer's own SMTP settings, used when AB Apps doesn't set a server</summary>` : ""}
         <div class="row">
           <div class="field" style="flex:1">
             <label>SMTP host</label>
@@ -52,6 +61,7 @@ window.Pages.settings = {
             <input type="email" id="from-email" value="${escapeHtml(settings.fromEmail)}" placeholder="defaults to SMTP username" />
           </div>
         </div>
+        ${settings.sharedMail ? "</details>" : ""}
         <div class="row">
           <div class="field" style="flex:1">
             <label>Test email address</label>
@@ -69,6 +79,9 @@ window.Pages.settings = {
         <h2 style="margin-top:0">Signup form (Gravity Forms)</h2>
         <p class="hint" style="margin-top:0">Lets the Import page bring in new signups. In WordPress, under Forms → Settings → REST API, turn the API on and
           add a key with read access; the site has to use https.</p>
+        ${gf.shared ? `<p class="shared-note">Signups are read from the website a manager set in AB Apps, <strong>${escapeHtml(gf.shared.siteUrl)}</strong>,
+          with its key. A manager changes it on AB Apps' Mail and website page.</p>
+        <details class="own-settings"><summary>This computer's own website settings, used when AB Apps doesn't set one</summary>` : ""}
         <div class="row">
           <div class="field" style="flex:1">
             <label for="gf-site">Website address</label>
@@ -85,6 +98,7 @@ window.Pages.settings = {
             <input type="password" id="gf-secret" placeholder="${gf.hasSecret ? "••••••••" : ""}" />
           </div>
         </div>
+        ${gf.shared ? "</details>" : ""}
         <div class="row">
           <div class="field" style="flex:1">
             <label for="gf-form">Signup form</label>
@@ -111,7 +125,7 @@ window.Pages.settings = {
           ${location.isDefault ? "" : `<button class="btn secondary" id="default-data-dir-btn" type="button">Use this computer's own folder</button>`}
         </div>
         <p class="hint">To share one list between computers, choose the same folder on each of them — on OneDrive, say. Each computer keeps its own email,
-          signup form and appearance settings.</p>
+          signup form and appearance settings, except the mail server and website when a manager sets them in AB Apps.</p>
       </div>
 
       <div class="panel">

@@ -16,6 +16,7 @@ const { renderTemplate, htmlToPlainText } = require("./lib/merge");
 const mailer = require("./lib/mailer");
 const duplicates = require("./lib/duplicates");
 const gravityForms = require("./lib/gravityForms");
+const { sharedServices } = require("./lib/abApps");
 const { Team, peopleDir, readPeople, isActive, activeHosts } = require("./lib/team");
 
 let mainWindow = null;
@@ -694,8 +695,14 @@ ipcMain.handle("publications:remove", async (event, id) => {
 // Gravity Forms signup form
 // ---------------------------------------------------------------------------
 
+// While a manager has set the website in AB Apps, the signup form is read
+// with its address and read-only key; which form stays this app's setting.
+const sharedWebsite = () => sharedServices(app.getPath("appData")).website;
+
 function gfConnection(overrides = {}) {
   const s = store.getSettings();
+  const website = sharedWebsite();
+  if (website) return { ...website, formId: overrides.formId || s.gfFormId || "" };
   const connection = {
     siteUrl: s.gfSiteUrl || "",
     consumerKey: s.gfConsumerKey || "",
@@ -715,6 +722,7 @@ ipcMain.handle("gf:get-settings", async () => {
     formId: s.gfFormId || "",
     formTitle: s.gfFormTitle || "",
     lastImportedEntryId: s.gfLastImportedEntryId || 0,
+    shared: sharedWebsite() ? { siteUrl: sharedWebsite().siteUrl } : null,
   };
 });
 
@@ -1238,6 +1246,7 @@ ipcMain.handle("settings:get", async () => {
     hasSmtpPassword: !!settings.smtpPassword,
     testEmail: settings.testEmail || "",
     theme: savedTheme(),
+    sharedMail: sharedMail(),
   };
 });
 
@@ -1264,7 +1273,14 @@ ipcMain.handle("settings:save-smtp", async (event, data) => {
   return true;
 });
 
+// While a manager has set the mail server in AB Apps, mailings go through
+// it, without signing in, and this computer's own SMTP settings wait unused
+// until it's cleared there.
+const sharedMail = () => sharedServices(app.getPath("appData")).mail;
+
 function resolveSmtpConfig() {
+  const mail = sharedMail();
+  if (mail) return { ...mail, user: "", password: "" };
   const s = store.getSettings();
   return {
     host: s.smtpHost,

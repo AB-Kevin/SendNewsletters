@@ -29,6 +29,10 @@ So John can get MAAP Newsletter by email and Our Health at his address by mail, 
 - A way to send through SMTP: either an email account (e.g. a Gmail account with an [app password](https://myaccount.google.com/apppasswords)), or an unauthenticated relay your IT team sets up (e.g. an IP-allowlisted connector on a static IP) — for the latter, leave **SMTP username/password blank in Settings** and fill in **From email**, since there's no username for it to default to.
 - For signup imports: the Gravity Forms REST API turned on (WordPress → Forms → Settings → REST API) with a key that can read entries, on a site using https.
 
+## Settings from AB Apps
+
+While someone is signed in to [AB Apps](https://github.com/AB-Kevin/ab-apps) and a manager has set them on its **Mail and website** page, SendNewsletters uses AB Apps' mail server and website instead of its own (`lib/abApps.js`). Mailings go through AB Apps' server, without signing in, and signups are read with its website address and read-only key. **Settings** shows both, with this computer's own settings folded away under them for when AB Apps doesn't set one. Which form is the signup form, and the test address, stay per computer.
+
 ## Getting started
 
 ```
