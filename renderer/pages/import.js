@@ -33,6 +33,10 @@ function rememberPublications(kind, ids) {
 window.Pages.import = {
   navAs: "contacts",
   async render(container) {
+    if (listFromMemberManager()) {
+      container.innerHTML = `<h1>Import</h1>${memberManagerNote("Imports are done in MemberManager now.")}`;
+      return;
+    }
     const gf = await window.api.getGfSettings();
     const signupReady = !!(gf.siteUrl && gf.formId);
     const initialMode = window.__importMode === "org" ? "org" : "person";

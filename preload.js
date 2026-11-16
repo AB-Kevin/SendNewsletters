@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld("api", {
   commitImport: (source, mapping, options) => invoke("import:commit", source, mapping, options),
 
   getList: () => invoke("list:get"),
+  // { memberManager, since, reachable }: whether the list comes from MemberManager.
+  getListSource: () => invoke("list:source"),
   updateList: (changes) => invoke("list:update", changes),
   createContact: () => invoke("contacts:create"),
   createOrg: () => invoke("orgs:create"),

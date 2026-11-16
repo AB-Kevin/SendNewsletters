@@ -61,8 +61,10 @@ window.Pages.contacts = {
     let pendingSaves = 0;
     let reviewCount = 0;
 
+    const fromMemberManager = listFromMemberManager();
     container.innerHTML = `
       <div class="sheet-page">
+        ${fromMemberManager ? memberManagerNote("This is who gets what, for making mailings.") : ""}
         <h1>Mailing List</h1>
         <div class="tabs">
           <button class="tab" data-tab="people" type="button">People</button>
@@ -371,7 +373,7 @@ window.Pages.contacts = {
           problems ? `<a href="#" data-show="problems">${plural(problems, "needs", "need")} attention</a>` : "",
         ];
       }
-      if (reviewCount) general.push(`<a href="#" data-duplicates>${plural(reviewCount, "possible duplicate")} to look at</a>`);
+      if (reviewCount && !fromMemberManager) general.push(`<a href="#" data-duplicates>${plural(reviewCount, "possible duplicate")} to look at</a>`);
       el.innerHTML = `<div>${general.filter(Boolean).join(" · ") || "No one on the list yet."}</div>${pubLines.map((l) => `<div class="pub-line">${l}</div>`).join("")}`;
       const filtered = state[tab].search || state[tab].show !== "all";
       qs("#view-count", container).textContent = filtered && sheet ? `${sheet.view.filter((row) => !memberOf(row.id)).length.toLocaleString()} shown` : "";
@@ -627,9 +629,9 @@ window.Pages.contacts = {
     const sheet = createSheet(qs("#sheet-host", container), {
       columns: columnsFor(),
       cell: (id, col) => {
-        if (tab !== "orgs") return personCell(id, col);
-        const member = memberOf(id);
-        return member ? memberCell(member, col) : orgCell(id, col);
+        const member = tab === "orgs" ? memberOf(id) : null;
+        const info = tab !== "orgs" ? personCell(id, col) : member ? memberCell(member, col) : orgCell(id, col);
+        return fromMemberManager ? { ...info, readOnly: true, readOnlyMessage: "Change this in MemberManager — the mailing list is kept there." } : info;
       },
       onToggle: (id) => {
         if (memberOf(id) || !orgs.has(id)) return;
@@ -894,8 +896,9 @@ window.Pages.contacts = {
       qs("#sheet-show", container).value = state[tab].show;
       if (qs("#sheet-show", container).value !== state[tab].show) state[tab].show = "all";
       qs("#add-row-btn", container).textContent = tab === "orgs" ? "Add organization" : "Add person";
-      qs("#sheet-help", container).innerHTML =
-        tab === "orgs"
+      qs("#sheet-help", container).innerHTML = fromMemberManager
+        ? "Shaded cells are shared by everyone at that address. Hatched cells mean their organization gets that newsletter for them. Export… saves the rows shown."
+        : tab === "orgs"
           ? "An organization's Mail and Copies are a batch for its members, sent to its address (to whoever's under Attention). Members are marked as covered (hatched), so they don't need their own copy. " +
             "Click the arrow by a Members count to list them underneath: their rows work as on the People tab — their own Email, and their household's Mail and Copies (tinted when others live there too)."
           : "Click a cell, then type or double-click to change it; Enter and Tab move on, Esc cancels, Ctrl+Z undoes, and a block pasted from Excel fills many cells. " +

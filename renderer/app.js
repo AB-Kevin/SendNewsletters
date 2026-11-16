@@ -179,6 +179,8 @@ function renderTeamStatus(status) {
 // How many possible duplicates (people, shared addresses, organizations)
 // are waiting, on the Duplicates button.
 async function refreshNavBadges() {
+  await refreshListSource();
+  if (listFromMemberManager()) return;
   const counts = await window.api.reviewCounts().catch(() => null);
   const badge = qs("#duplicates-badge");
   if (!counts || !badge) return;
@@ -197,6 +199,32 @@ function sendBlockedReason() {
     : "Only the host computer sends emails, and its app isn't open right now. A test email works from here.";
 }
 
+// Once MemberManager keeps the mailing list (main.js, "The mailing list from
+// MemberManager"), it's changed only there: the Mailing List shows it
+// read-only, and Import and Duplicates step aside.
+window.__listSource = { memberManager: false };
+const listFromMemberManager = () => !!window.__listSource.memberManager;
+async function refreshListSource() {
+  window.__listSource = (await window.api.getListSource().catch(() => null)) || window.__listSource;
+  if (window.__listSource.notice) toast(window.__listSource.notice);
+  const fromMemberManager = listFromMemberManager();
+  document.body.classList.toggle("list-from-member-manager", fromMemberManager);
+  const duplicates = qs('.nav-btn[data-page="duplicates"]');
+  if (duplicates) duplicates.style.display = fromMemberManager ? "none" : "";
+}
+
+/** The note shown where the list used to be changed. */
+function memberManagerNote(what) {
+  const source = window.__listSource;
+  return `<div class="shared-note member-manager-note">${what} The mailing list is kept in <strong>MemberManager</strong>: change people, addresses,
+    organizations and who gets which newsletter there, and it shows here within a minute or so.${
+      source.reachable ? "" : " MemberManager's list can't be reached from this computer right now, so this is the list as it was last copied."
+    }</div>`;
+}
+
+window.listFromMemberManager = listFromMemberManager;
+window.refreshListSource = refreshListSource;
+window.memberManagerNote = memberManagerNote;
 window.navigate = navigate;
 window.sendBlockedReason = sendBlockedReason;
 window.onDataChanged = onDataChanged;

@@ -75,7 +75,7 @@ window.Pages.settings = {
         </div>
       </div>
 
-      <div class="panel">
+      <div class="panel" ${listFromMemberManager() ? "hidden" : ""}>
         <h2 style="margin-top:0">Signup form (Gravity Forms)</h2>
         <p class="hint" style="margin-top:0">Lets the Import page bring in new signups. In WordPress, under Forms → Settings → REST API, turn the API on and
           add a key with read access; the site has to use https.</p>

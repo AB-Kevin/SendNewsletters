@@ -620,3 +620,11 @@ th.num, td.num { text-align: right; }
 
 .people-list { margin: 8px 0 0; padding-left: 18px; }
 .people-list li { margin: 2px 0; }
+
+/* ---- once MemberManager keeps the mailing list (app.js, listFromMemberManager) ---- */
+.member-manager-note { margin-bottom: 12px; }
+.list-from-member-manager #add-row-btn,
+.list-from-member-manager #import-btn,
+.list-from-member-manager #pubs-btn,
+.list-from-member-manager #selection-bar,
+.list-from-member-manager .sheet-page .sel-col input { display: none !important; }

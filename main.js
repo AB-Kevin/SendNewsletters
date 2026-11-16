@@ -20,6 +20,8 @@ const { membershipPreset } = require("./lib/membership");
 const { appFolder, chooseFolder, readMovedNote, moveToAbApps } = require("ab-common/appfolder");
 const { readIdentity, watchIdentity, sharedServices } = require("./lib/abApps");
 const { Team, peopleDir, readPeople, isActive, activeHosts } = require("./lib/team");
+const memberList = require("ab-common/members");
+const { followRetired } = require("./lib/retired");
 
 let mainWindow = null;
 
@@ -129,6 +131,7 @@ app.whenReady().then(() => {
     const folderChanged = next?.dataDir !== abIdentity?.dataDir;
     abIdentity = next;
     if (folderChanged) followToAbApps();
+    followMemberManager();
     try {
       team?.setName(shownName(), abIdentity?.personId ?? null);
     } catch {
@@ -181,11 +184,15 @@ function abAppsTarget() {
 
 // Works out where the list is. When that's the AB Apps subfolder but this
 // computer uses another, points it there and returns the folder; otherwise null.
+//
+// A computer that has never had a list of its own (no folder chosen, and its
+// own default folder not made yet) goes straight to the AB Apps folder,
+// rather than waiting there for a folder that will never sync.
 function choosePlace() {
-  const own = configuredDataDir() || defaultDataDir();
+  const own = configuredDataDir() || (fs.existsSync(defaultDataDir()) ? defaultDataDir() : null);
   const target = abAppsTarget();
   folderChoice = { ...chooseFolder({ own, target, hasData: (dir) => store.isDataFolder(dir) }), target };
-  if (folderChoice.reason !== "ab-apps" || samePath(own, folderChoice.dir)) return null;
+  if (folderChoice.reason !== "ab-apps" || !folderChoice.dir || (own && samePath(own, folderChoice.dir))) return null;
   fs.mkdirSync(folderChoice.dir, { recursive: true });
   // This computer's own changes made between the move's copy and now are only
   // in the old folder; its files there have one writer -- this computer.
@@ -196,7 +203,7 @@ function choosePlace() {
   } catch {
     // No settings yet: nothing of this computer's to bring across.
   }
-  if (mine && readMovedNote(own)) {
+  if (mine && own && readMovedNote(own)) {
     for (const name of [`${mine}.json`, `${mine}.changes.json`]) {
       const a = path.join(own, "people", name);
       const b = path.join(folderChoice.dir, "people", name);
@@ -458,7 +465,8 @@ function openTeam() {
   team.open(store.getDataDir(), { isHost: !!me.isHost, hostSince: me.hostSince });
   store.setJournal(team.journal);
   updateRole();
-  if (actingHost) seedPublications();
+  if (actingHost && store.getSettings().listFrom !== "MemberManager") seedPublications();
+  followMemberManager();
 }
 
 // Works out whether this computer acts as host. The host then saves anything
@@ -470,8 +478,10 @@ function updateRole() {
     actingHost = acting;
     team.setActing(acting);
   }
-  if (actingHost) saveIncoming();
-  else team.trim(store.isReflected);
+  if (actingHost) {
+    saveIncoming();
+    syncFromMemberManager();
+  } else team.trim(store.isReflected);
   sendTeamStatus();
 }
 
@@ -495,6 +505,7 @@ function watchTeam() {
   // A manager moved the list while this computer had it open: follow it.
   team.on("tick", () => {
     if (folderChoice.reason === "not-moved" && readMovedNote(store.getDataDir())) followToAbApps();
+    followMemberManager();
   });
   // The host saved: everyone else shows the new list.
   team.on("shared", () => {
@@ -567,6 +578,113 @@ function requireHost(what) {
     `Only the host computer ${what}${host ? ` — that's ${host.name}'s computer` : ", and its app isn't open right now"}. A test email works from any computer.`
   );
 }
+
+// ---------------------------------------------------------------------------
+// The mailing list from MemberManager
+// ---------------------------------------------------------------------------
+// MemberManager keeps the office's member list -- the people, households,
+// organizations and newsletters this app's list used to hold, in the same
+// shapes and with the same ids -- in its subfolder of the AB Apps folder
+// (ab-common's members.js). Once it has a list there, the host copies it into
+// this app's own list files whenever MemberManager saves, and the list is
+// changed only in MemberManager from then on: the Mailing List, Import,
+// Duplicates and Newsletters can't change it here. Everything else -- which
+// is all about mailings -- reads the copy as it always read the list, and
+// every computer gets it the way it gets the host's other saves.
+//
+// `listFrom: "MemberManager"` in the shared settings records the switch, so
+// every computer knows, even one that can't see MemberManager's folder. The
+// list then stays as it was last copied until the host can read it again.
+
+// MemberManager's folder while it's being watched, and how to stop watching.
+let memberFolder = null;
+let stopWatchingMembers = null;
+
+const listFromMemberManager = () => store.getSettings().listFrom === "MemberManager";
+
+/** For changes to the list itself, which are MemberManager's once it keeps it. */
+function requireOwnList() {
+  if (listFromMemberManager()) {
+    throw new Error("The mailing list is kept in MemberManager now. Change it there, and it shows here within a minute or so.");
+  }
+}
+
+// Starts or stops watching MemberManager's folder as someone signs in to AB
+// Apps or out, or as MemberManager starts a list.
+function followMemberManager() {
+  const folder = memberList.memberListFolder(abIdentity);
+  if (folder !== memberFolder) {
+    stopWatchingMembers?.();
+    stopWatchingMembers = null;
+    memberFolder = folder;
+    if (folder) stopWatchingMembers = memberList.watchMemberList(folder, () => syncFromMemberManager());
+  }
+  syncFromMemberManager();
+}
+
+const sameRows = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+// What became of the people, households and organizations mailings point
+// at, once MemberManager deleted or merged them (its retired.json): a
+// mailing that hasn't reached one yet moves to the one it was merged into,
+// or drops it; one that has keeps a copy of who and where it was, from this
+// app's list as it was before (`before`) or MemberManager's record of it.
+function followMemberManagerRetired(list, before) {
+  const snapshotOf = (kind, id) => {
+    if (kind === "contact" && before.contactById.has(id)) return before.contactById.get(id);
+    if (kind === "household" && before.householdById.has(id)) return describeHousehold(before.householdById.get(id), before.membersOf.get(id) || [], before);
+    if (kind === "org" && before.orgById.has(id)) return describeOrg(before.orgById.get(id), before);
+    return list.retired.find((r) => r.kind === kind && r.fromId === id)?.snapshot || null;
+  };
+  const recipients = store.list("mailingRecipients");
+  const { rows, changed } = followRetired(recipients, (kind, id) => memberList.currentId(list, kind, id), snapshotOf);
+  if (changed) store.mutate("mailingRecipients", () => rows);
+  return changed;
+}
+
+// The host's job: copies MemberManager's list into this app's, when it's
+// changed. Elsewhere, the copy arrives as the host's other saves do.
+let lastSyncProblem = null;
+// Said once, when the window next asks (list:source): the switch happens at
+// startup, before there's a window to say it in.
+let memberManagerNotice = null;
+function syncFromMemberManager() {
+  if (!memberFolder || !actingHost) return;
+  const list = memberList.readMemberList(memberFolder);
+  if (!list) return; // OneDrive is mid-sync; the next save or tick tries again
+  const before = loadList();
+  try {
+    const moved = followMemberManagerRetired(list, before);
+    const collections = { contacts: list.contacts, households: list.households, orgs: list.orgs, publications: list.publications };
+    let copied = 0;
+    for (const [name, rows] of Object.entries(collections)) {
+      if (sameRows(store.list(name), rows)) continue;
+      store.mutate(name, () => rows);
+      copied++;
+    }
+    const first = !listFromMemberManager();
+    if (first) store.updateSettings({ listFrom: "MemberManager", listFromSince: new Date().toISOString() });
+    lastSyncProblem = null;
+    if (first) memberManagerNotice = "The mailing list comes from MemberManager now. Change people and who gets which newsletter there.";
+    if (first || copied || moved) dataChanged(null);
+  } catch (err) {
+    // Left as it was; the next save or tick tries again.
+    if (lastSyncProblem !== err.message) console.error("Couldn't copy MemberManager's list:", err);
+    lastSyncProblem = err.message;
+  }
+}
+
+ipcMain.handle("list:source", async () => {
+  const notice = memberManagerNotice;
+  memberManagerNotice = null;
+  return {
+    memberManager: listFromMemberManager(),
+    since: store.getSettings().listFromSince || null,
+    // Whether this computer can see MemberManager's list right now.
+    reachable: !!memberFolder,
+    notice,
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -708,7 +826,9 @@ function recipientPlace(recipient, list) {
 function recipientCopies(recipient, place, publicationId) {
   if (recipient.channel !== "mail") return null;
   if (recipient.status === "sent" && Number.isFinite(recipient.copies)) return recipient.copies;
-  return rules.copiesFor(place, publicationId);
+  // A Fix & resend that turned an email into a mailed copy, with the list in
+  // MemberManager, kept its number of copies on the recipient.
+  return rules.copiesFor(place, publicationId) || (Number.isFinite(recipient.copies) ? recipient.copies : 0);
 }
 
 function sum(values) {
@@ -807,12 +927,19 @@ function checkPublicationName(name, exceptId) {
   return clean;
 }
 
-ipcMain.handle("publications:add", async (event, name) => store.insert("publications", { name: checkPublicationName(name) }));
+ipcMain.handle("publications:add", async (event, name) => {
+  requireOwnList();
+  return store.insert("publications", { name: checkPublicationName(name) });
+});
 
-ipcMain.handle("publications:rename", async (event, id, name) => store.update("publications", id, { name: checkPublicationName(name, id) }));
+ipcMain.handle("publications:rename", async (event, id, name) => {
+  requireOwnList();
+  return store.update("publications", id, { name: checkPublicationName(name, id) });
+});
 
 // Takes it off everyone; past mailings of it keep its name.
 ipcMain.handle("publications:remove", async (event, id) => {
+  requireOwnList();
   const strip = (row) => (row.subs && id in row.subs ? { subs: Object.fromEntries(Object.entries(row.subs).filter(([key]) => key !== id)) } : null);
   for (const collection of ["contacts", "households", "orgs"]) store.updateWhere(collection, strip);
   store.remove("publications", id);
@@ -907,6 +1034,7 @@ function readImportSource(source) {
 }
 
 ipcMain.handle("import:preview", async (event, source) => {
+  requireOwnList();
   let label;
   if (source.kind === "signup") {
     const connection = gfConnection();
@@ -952,6 +1080,7 @@ ipcMain.handle("import:plan", async (event, source, mapping, options) => {
 });
 
 ipcMain.handle("import:commit", async (event, source, mapping, options) => {
+  requireOwnList();
   const plan = planImport(source, mapping, options);
   const before = loadList();
   const now = new Date().toISOString();
@@ -983,14 +1112,19 @@ ipcMain.handle("list:get", async () => {
 });
 
 ipcMain.handle("contacts:create", async () =>
+  requireOwnList() ||
   store.insert("contacts", { ...BLANK_CONTACT, sourceBatch: "Added by hand", updatedAt: new Date().toISOString() })
 );
 
-ipcMain.handle("orgs:create", async () => store.insert("orgs", { ...BLANK_ORG, sourceBatch: "Added by hand", updatedAt: new Date().toISOString() }));
+ipcMain.handle("orgs:create", async () => {
+  requireOwnList();
+  return store.insert("orgs", { ...BLANK_ORG, sourceBatch: "Added by hand", updatedAt: new Date().toISOString() });
+});
 
 // Gives someone with no address a household of their own, so an address or
 // a mailed newsletter can be filled in for them.
 ipcMain.handle("households:create-for", async (event, contactId) => {
+  requireOwnList();
   const contact = store.get("contacts", contactId);
   if (!contact) throw new Error("Contact not found.");
   if (contact.householdId && store.get("households", contact.householdId)) throw new Error("They already have an address.");
@@ -1006,6 +1140,7 @@ ipcMain.handle("households:create-for", async (event, contactId) => {
 // one yet, or unlinks them when blank. Returns the saved rows, so the page
 // shows exactly what was stored.
 ipcMain.handle("list:update", async (event, changes) => {
+  requireOwnList();
   const now = new Date().toISOString();
   const publicationIds = new Set(store.list("publications").map((p) => p.id));
   const byKind = { contact: new Map(), household: new Map(), org: new Map() };
@@ -1059,6 +1194,7 @@ ipcMain.handle("list:update", async (event, changes) => {
 // address nobody lives at any more is removed the same way. Where a mailing
 // already went, the recipient keeps a copy so its history still shows who.
 ipcMain.handle("contacts:delete-many", async (event, ids) => {
+  requireOwnList();
   const idSet = new Set(ids || []);
   const deleted = new Map(store.list("contacts").filter((c) => idSet.has(c.id)).map((c) => [c.id, c]));
   store.removeWhere("mailingRecipients", (r) => deleted.has(r.contactId) && r.status === "pending");
@@ -1072,6 +1208,7 @@ ipcMain.handle("contacts:delete-many", async (event, ids) => {
 
 // Their members stay on the list, just no longer part of it.
 ipcMain.handle("orgs:delete-many", async (event, ids) => {
+  requireOwnList();
   const idSet = new Set(ids || []);
   retirePlaces("org", idSet);
   store.updateWhere("contacts", (c) => (idSet.has(c.orgId) ? { orgId: null, updatedAt: new Date().toISOString() } : null));
@@ -1119,6 +1256,7 @@ function combineHouseholds({ contactIds = [], householdIds = [] }) {
 }
 
 ipcMain.handle("households:combine", async (event, selection) => {
+  requireOwnList();
   combineHouseholds(selection);
   return true;
 });
@@ -1128,6 +1266,7 @@ ipcMain.handle("households:combine", async (event, selection) => {
 // to fill in. It gets the same newsletters by mail, one copy each.
 // Remembered, so they aren't suggested as one household again.
 ipcMain.handle("households:separate", async (event, contactIds) => {
+  requireOwnList();
   const list = loadList();
   const now = new Date().toISOString();
   let separated = 0;
@@ -1261,6 +1400,7 @@ ipcMain.handle("review:list", async () => {
 });
 
 ipcMain.handle("review:dismiss", async (event, kind, ids) => {
+  requireOwnList();
   dismissPairs(kind, ids || []);
   return true;
 });
@@ -1271,6 +1411,7 @@ ipcMain.handle("review:dismiss", async (event, kind, ids) => {
 // email. Mailings that went to any of them now show the kept contact; one
 // that hasn't gone out yet sends them one copy.
 ipcMain.handle("contacts:merge", async (event, { keepId, removeIds, values, householdId }) => {
+  requireOwnList();
   const list = loadList();
   const keep = list.contactById.get(keepId);
   const removing = (removeIds || []).filter((id) => id !== keepId && list.contactById.has(id));
@@ -1316,6 +1457,7 @@ ipcMain.handle("contacts:merge", async (event, { keepId, removeIds, values, hous
 // every newsletter any of them got, with the most copies any had; their
 // members all belong to it now.
 ipcMain.handle("orgs:merge", async (event, { keepId, removeIds, values, addressFrom }) => {
+  requireOwnList();
   const list = loadList();
   const keep = list.orgById.get(keepId);
   const removing = (removeIds || []).filter((id) => id !== keepId && list.orgById.has(id));
@@ -1603,7 +1745,7 @@ function emailTarget(recipient, list, publicationId) {
     const org = list.orgById.get(recipient.orgId);
     if (!org) return null;
     return {
-      email: org.email,
+      email: recipient.email || org.email,
       label: org.name,
       fields: { ...org, name: org.attn || org.name, orgName: org.name, copies: rules.copiesFor(org, publicationId) },
     };
@@ -1612,7 +1754,8 @@ function emailTarget(recipient, list, publicationId) {
   if (!contact) return null;
   const h = list.householdById.get(contact.householdId);
   return {
-    email: contact.email,
+    // A Fix & resend's address, for a list kept in MemberManager.
+    email: recipient.email || contact.email,
     label: contactLabel(contact),
     fields: {
       ...contact,
@@ -1799,26 +1942,41 @@ ipcMain.handle("delivery:retry-send", async (event, recipientId, email) => {
   const collection = isOrg ? "orgs" : "contacts";
 
   const cleaned = cleanText(email);
+  // With MemberManager's list, the fix is for this mailing only: the list
+  // itself is changed in MemberManager.
+  const ownList = !listFromMemberManager();
   if (!cleaned) {
     const place = isOrg ? record : list.householdById.get(record.householdId);
     if (!rules.hasMailingAddress(place)) {
-      throw new Error("There's no mailing address on file for them. Add one on the Mailing List first, or enter an email address.");
+      throw new Error(
+        ownList
+          ? "There's no mailing address on file for them. Add one on the Mailing List first, or enter an email address."
+          : "There's no mailing address on file for them. Add one in MemberManager first, or enter an email address."
+      );
     }
-    store.update(collection, record.id, { email: "", subs: mergeSubs(record.subs, { [pubId]: { email: false } }), updatedAt: now });
     const placeCollection = isOrg ? "orgs" : "households";
-    const fresh = store.get(placeCollection, place.id);
-    const copies = rules.copiesFor(fresh, pubId) || 1;
-    store.update(placeCollection, place.id, { subs: mergeSubs(fresh.subs, { [pubId]: { mail: true, copies } }), updatedAt: now });
+    if (ownList) {
+      store.update(collection, record.id, { email: "", subs: mergeSubs(record.subs, { [pubId]: { email: false } }), updatedAt: now });
+      const fresh = store.get(placeCollection, place.id);
+      const copies = rules.copiesFor(fresh, pubId) || 1;
+      store.update(placeCollection, place.id, { subs: mergeSubs(fresh.subs, { [pubId]: { mail: true, copies } }), updatedAt: now });
+    }
     const placeKey = isOrg ? "orgId" : "householdId";
     const alreadyMailed = store.list("mailingRecipients").some((r) => r.mailingId === mailing.id && r.channel === "mail" && r[placeKey] === place.id);
     if (alreadyMailed) {
       store.remove("mailingRecipients", recipient.id);
       return { outcome: "removed" };
     }
-    store.update("mailingRecipients", recipient.id, { channel: "mail", contactId: null, [placeKey]: place.id, error: null });
-    return { outcome: "mail" };
+    store.update("mailingRecipients", recipient.id, { channel: "mail", contactId: null, [placeKey]: place.id, error: null, ...(ownList ? {} : { copies: rules.copiesFor(place, pubId) || 1 }) });
+    return { outcome: "mail", inMemberManager: !ownList };
   }
 
+  if (!ownList) {
+    // Sent to the corrected address, kept on the recipient.
+    const fixed = cleaned === record.email ? recipient : store.update("mailingRecipients", recipient.id, { email: cleaned });
+    await emailRecipient(fixed, emailTarget(fixed, list, pubId), loadSendContext(mailing));
+    return { outcome: "sent", inMemberManager: cleaned !== record.email };
+  }
   if (cleaned !== record.email || !rules.sub(record, pubId).email) {
     store.update(collection, record.id, { email: cleaned, subs: mergeSubs(record.subs, { [pubId]: { email: true } }), updatedAt: now });
   }

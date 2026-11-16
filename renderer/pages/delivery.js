@@ -339,13 +339,14 @@ window.Pages.delivery = {
         btn.disabled = true;
         btn.textContent = "Sending…";
         try {
-          const { outcome } = await window.api.retrySend(recipientId, qs(".retry-email", cell).value);
+          const { outcome, inMemberManager } = await window.api.retrySend(recipientId, qs(".retry-email", cell).value);
           toast(
-            outcome === "sent"
+            (outcome === "sent"
               ? "Email sent."
               : outcome === "mail"
               ? "Switched to mail — their address is now on this mailing's addresses to mail."
-              : "Taken off the email side — their address is already getting this one by mail."
+              : "Taken off the email side — their address is already getting this one by mail.") +
+              (inMemberManager ? " That's for this mailing only: change their email address in MemberManager for the next one." : "")
           );
         } catch (err) {
           toast(`Still failing: ${err.message}`, true);

@@ -2,6 +2,18 @@
 
 A desktop tool for keeping the mailing list for the office's newsletters and magazines (MAAP Newsletter and Our Health to start) and sending each issue out: emailed as a PDF attachment to everyone who gets it by email, and an address list with copy counts for every address and organization that gets it by mail.
 
+## The mailing list comes from MemberManager
+
+[MemberManager](https://github.com/AB-Kevin/MemberManager) keeps the office's member list: everyone below, their households and organizations, and who gets which newsletter. While someone is signed in to [AB Apps](https://github.com/AB-Kevin/ab-apps) and MemberManager has a list in the AB Apps folder, SendNewsletters uses that list (`ab-common/members`):
+
+- **The host keeps a copy of it** in SendNewsletters' own list files, updated within seconds of MemberManager saving, and the other computers get it the way they get the host's other saves. Mailings, Delivery and Templates use the copy as they always used the list. The records keep their ids, so past mailings still point at the right people.
+- **It's changed only in MemberManager.** The Mailing List shows it read-only (Export still works), Import and Duplicates step aside, and newsletters are added and renamed there. The shared setting `listFrom: "MemberManager"` records the switch, so every computer knows, and the list stays as last copied if MemberManager's folder can't be reached.
+- **People MemberManager deletes or merges** (its `retired.json`, `lib/retired.js`) leave mailings that haven't reached them, or move to the person or address they were merged into; a mailing that has already gone keeps a copy of who and where it went.
+- **Fix & resend** sends to the corrected address, or by mail, for that mailing only. Change the address in MemberManager for the next one.
+- The signup form is imported in MemberManager now, so its settings here are hidden.
+
+Without AB Apps, or before MemberManager has a list, everything below works as it always has.
+
 ## Who gets what
 
 There are three kinds of recipient, and each newsletter is set separately for each:

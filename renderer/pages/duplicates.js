@@ -15,6 +15,10 @@ function placeSummary(place) {
 
 window.Pages.duplicates = {
   async render(container) {
+    if (listFromMemberManager()) {
+      container.innerHTML = `<h1>Duplicates</h1>${memberManagerNote("Duplicates are looked after in MemberManager now.")}`;
+      return;
+    }
     const review = await window.api.listReview();
     const R = window.ContactRules;
     const pubs = review.publications;
